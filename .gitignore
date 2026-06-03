@@ -1,0 +1,37 @@
+.DS_Store
+
+# Build output
+Build/
+.build/
+.swiftpm/
+DerivedData/
+*.app
+*.dSYM
+*.xcarchive
+*.pkg
+*.ipa
+
+# Swift Package Manager
+Packages/
+Package.resolved
+
+# Xcode user state
+*.xcuserstate
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Signing, secrets, and local configuration
+*.p12
+*.mobileprovision
+*.provisionprofile
+*.cer
+*.key
+*.pem
+*.env
+*.env.*
+Secrets.*
+secrets.*
+
+# Generated icon intermediates
+icon_raw.png
