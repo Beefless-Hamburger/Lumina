@@ -1,7 +1,8 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-TMP_BIN="/tmp/LuminaBackendTests"
+TMP_BIN="$(mktemp -t LuminaBackendTests.XXXXXX)"
+trap 'rm -f "$TMP_BIN"' EXIT
 
 swiftc -DLUMINA_BACKEND_TESTS \
     DisplayBackend.swift \
@@ -13,7 +14,6 @@ swiftc -DLUMINA_BACKEND_TESTS \
     LuminaBackendTests.swift \
     SystemBetterDisplayTransport.swift \
     -o "$TMP_BIN" \
-    -target arm64-apple-macosx13.0 \
     -framework AppKit \
     -framework Foundation \
     -O
