@@ -18,7 +18,8 @@ actor SystemBetterDisplayTransport: BetterDisplayTransport {
 
         logger.info("Launching BetterDisplay before \(context, privacy: .private).")
 
-        let requestedLaunch = await MainActor.run { [appBundleID] in
+        let launchLogger = logger
+        let requestedLaunch = await MainActor.run { [appBundleID, launchLogger] in
             guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: appBundleID) else {
                 return false
             }
@@ -27,7 +28,7 @@ actor SystemBetterDisplayTransport: BetterDisplayTransport {
             configuration.activates = false
             NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, error in
                 if let error {
-                    self.logger.error("BetterDisplay launch failed: \(error.localizedDescription, privacy: .public)")
+                    launchLogger.error("BetterDisplay launch failed: \(error.localizedDescription, privacy: .public)")
                 }
             }
             return true
