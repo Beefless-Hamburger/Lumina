@@ -22,4 +22,4 @@ jobs:
         run: bash test_backend.sh
 
       - name: Build app bundle
-        run: bash build.sh
+        run: BUILD_TARGET="$(uname -m)-apple-macosx13.0" bash build.sh
