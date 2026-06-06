@@ -61,7 +61,7 @@ actor SystemBetterDisplayTransport: BetterDisplayTransport {
     }
 
     func run(arguments: [String], context: String, captureOutput: Bool) async -> BetterDisplayExecutionResult? {
-        guard let executableURL = betterDisplayExecutableURL() else {
+        guard let executableURL = await betterDisplayExecutableURL() else {
             logger.error("BetterDisplay executable was not found while \(context, privacy: .private).")
             return nil
         }
@@ -101,10 +101,13 @@ actor SystemBetterDisplayTransport: BetterDisplayTransport {
         return BetterDisplayExecutionResult(output: outputString, errorOutput: errorString, exitCode: process.terminationStatus)
     }
 
-    private func betterDisplayExecutableURL() -> URL? {
+    private func betterDisplayExecutableURL() async -> URL? {
         let fileManager = FileManager.default
+        let applicationURL = await MainActor.run { [appBundleID] in
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: appBundleID)
+        }
 
-        if let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: appBundleID) {
+        if let applicationURL {
             let executableURL = applicationURL.appendingPathComponent("Contents/MacOS/BetterDisplay")
             if fileManager.isExecutableFile(atPath: executableURL.path) {
                 return executableURL
