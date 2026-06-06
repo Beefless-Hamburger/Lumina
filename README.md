@@ -68,7 +68,7 @@ Run the backend tests:
 Run the logic tests:
 
 ```bash
-swiftc -DLUMINA_LOGIC_TESTS DisplayLogic.swift BetterDisplayOutputParser.swift LuminaLogicTests.swift -o /tmp/LuminaLogicTests && /tmp/LuminaLogicTests
+./test_logic.sh
 ```
 
 ## How It Works
