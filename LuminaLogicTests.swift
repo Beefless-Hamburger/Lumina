@@ -52,6 +52,17 @@ struct LuminaLogicTests {
         [{"name":"Zeta"},{"name":"Alpha"},{"name":"Default Group"}]
         """
         expect(parseDisplayNames(from: arrayPayload) == ["Alpha", "Zeta"], "Array display parsing")
+
+        let noisyPayload = """
+        [
+          {"deviceType":"Display","name":"  Display Epsilon  "},
+          {"deviceType":"Display","name":"Display Epsilon"},
+          {"deviceType":"DisplayGroup","name":"Display Group"},
+          {"deviceType":"Display","name":""},
+          {"name":"Display Zeta"}
+        ]
+        """
+        expect(parseDisplayNames(from: noisyPayload) == ["Display Epsilon", "Display Zeta"], "Display parsing should trim, deduplicate, and filter groups")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
