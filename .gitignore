@@ -33,5 +33,10 @@ xcuserdata/
 Secrets.*
 secrets.*
 
+# Local test output
+*.log
+LuminaBackendTests
+LuminaLogicTests
+
 # Generated icon intermediates
 icon_raw.png
