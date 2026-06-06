@@ -68,8 +68,29 @@ private func parseDisplayNames(fromWrappedPayload payload: String) -> [String]? 
 }
 
 private func extractDisplayNames(from dictionaries: [[String: Any]]) -> [String] {
-    dictionaries
-        .compactMap { $0["name"] as? String }
-        .filter { $0 != "Default Group" }
-        .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    let candidates = dictionaries.compactMap { dictionary -> String? in
+        if let deviceType = dictionary["deviceType"] as? String,
+           deviceType.localizedCaseInsensitiveCompare("Display") != .orderedSame {
+            return nil
+        }
+
+        guard let rawName = dictionary["name"] as? String else {
+            return nil
+        }
+
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name != "Default Group" else {
+            return nil
+        }
+
+        return name
+    }
+
+    var seenNames = Set<String>()
+    var uniqueNames: [String] = []
+    for name in candidates where seenNames.insert(name).inserted {
+        uniqueNames.append(name)
+    }
+
+    return uniqueNames.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
 }
