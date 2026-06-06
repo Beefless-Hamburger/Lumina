@@ -3,7 +3,7 @@ import Foundation
 import os
 
 actor SystemBetterDisplayTransport: BetterDisplayTransport {
-    private let cliPath = "/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
+    private let fallbackCLIPath = "/Applications/BetterDisplay.app/Contents/MacOS/BetterDisplay"
     private let appBundleID = "pro.betterdisplay.BetterDisplay"
     private let logger = Logger(subsystem: "io.github.lumina-app.Lumina", category: "BetterDisplayTransport")
 
@@ -61,8 +61,13 @@ actor SystemBetterDisplayTransport: BetterDisplayTransport {
     }
 
     func run(arguments: [String], context: String, captureOutput: Bool) async -> BetterDisplayExecutionResult? {
+        guard let executableURL = betterDisplayExecutableURL() else {
+            logger.error("BetterDisplay executable was not found while \(context, privacy: .private).")
+            return nil
+        }
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: cliPath)
+        process.executableURL = executableURL
         process.arguments = arguments
 
         let standardOutput = Pipe()
@@ -94,5 +99,22 @@ actor SystemBetterDisplayTransport: BetterDisplayTransport {
         }
 
         return BetterDisplayExecutionResult(output: outputString, errorOutput: errorString, exitCode: process.terminationStatus)
+    }
+
+    private func betterDisplayExecutableURL() -> URL? {
+        let fileManager = FileManager.default
+
+        if let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: appBundleID) {
+            let executableURL = applicationURL.appendingPathComponent("Contents/MacOS/BetterDisplay")
+            if fileManager.isExecutableFile(atPath: executableURL.path) {
+                return executableURL
+            }
+        }
+
+        guard fileManager.isExecutableFile(atPath: fallbackCLIPath) else {
+            return nil
+        }
+
+        return URL(fileURLWithPath: fallbackCLIPath)
     }
 }
