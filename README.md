@@ -37,7 +37,7 @@ Lumina is not a general display manager. It is a focused automation layer around
 ## Requirements
 
 - macOS 13.0 or later.
-- Apple Silicon for the provided `build.sh` target.
+- Apple Silicon by default for `build.sh`; other macOS targets can be supplied with `BUILD_TARGET`.
 - [BetterDisplay](https://github.com/waydabber/BetterDisplay) installed at `/Applications/BetterDisplay.app`.
 - A display path supported by BetterDisplay's CLI and DDC controls.
 
@@ -56,6 +56,12 @@ Build/Lumina.app
 ```
 
 The build script compiles the Swift sources directly with `swiftc`, creates the app bundle and `Info.plist`, copies the app icon, strips cloud-sync extended attributes that can break signing, and ad-hoc signs the bundle.
+
+To build for a different local target, override `BUILD_TARGET`:
+
+```bash
+BUILD_TARGET="$(uname -m)-apple-macosx13.0" bash build.sh
+```
 
 ## Testing
 
