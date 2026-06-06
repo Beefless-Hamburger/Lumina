@@ -1,8 +1,9 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 APP_NAME="Lumina"
 BUILD_DIR="Build"
+BUILD_TARGET="${BUILD_TARGET:-arm64-apple-macosx13.0}"
 
 clean_bundle_metadata() {
     local bundle_path="$1"
@@ -21,8 +22,7 @@ rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/$APP_NAME.app/Contents/MacOS"
 mkdir -p "$BUILD_DIR/$APP_NAME.app/Contents/Resources"
 
-echo "Compiling..."
-# Compile for Apple Silicon
+echo "Compiling for $BUILD_TARGET..."
 swiftc AppDelegate.swift \
     DisplayBackend.swift \
     BetterDisplayTransport.swift \
@@ -36,7 +36,7 @@ swiftc AppDelegate.swift \
     SystemBetterDisplayTransport.swift \
     VisualEffectView.swift \
     -o "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME" \
-    -target arm64-apple-macosx13.0 \
+    -target "$BUILD_TARGET" \
     -framework SwiftUI \
     -framework AppKit \
     -framework Combine \
