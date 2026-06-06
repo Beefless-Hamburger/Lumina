@@ -60,7 +60,7 @@ final class DisplayMonitor: NSObject {
             DistributedNotificationCenter.default().removeObserver(observer)
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
-        heartbeatTimer?.invalidate()
+        stopHeartbeatTimer()
     }
 
     func updateMenu() {
@@ -157,6 +157,16 @@ final class DisplayMonitor: NSObject {
 
     @objc func toggleAutoOff() {
         autoOffOnLock.toggle()
+
+        if isLockedOrAsleep {
+            if autoOffOnLock {
+                executePowerOff()
+                startHeartbeatTimer()
+            } else {
+                stopHeartbeatTimer()
+            }
+        }
+
         updateMenu()
     }
 
@@ -201,7 +211,7 @@ final class DisplayMonitor: NSObject {
         if aboutWindow == nil {
             let hostingController = NSHostingController(rootView: AboutView())
             let window = NSWindow(
-                contentRect: .zero,
+                contentRect: NSRect(x: 0, y: 0, width: 360, height: 390),
                 styleMask: [.titled, .closable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
@@ -341,19 +351,14 @@ final class DisplayMonitor: NSObject {
         isLockedOrAsleep = true
         logger.debug("System locked or slept.")
 
-        if autoOffOnLock {
-            executePowerOff()
+        guard autoOffOnLock else {
+            stopHeartbeatTimer()
+            logger.debug("Auto-off on lock/sleep is disabled; skipping shutdown heartbeat.")
+            return
         }
 
-        heartbeatTimer?.invalidate()
-        let timer = Timer.scheduledTimer(withTimeInterval: 900.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, self.isLockedOrAsleep else { return }
-                self.executePowerOff()
-            }
-        }
-        timer.tolerance = 60.0
-        heartbeatTimer = timer
+        executePowerOff()
+        startHeartbeatTimer()
     }
 
     func handleWakeOrUnlock() {
@@ -365,12 +370,34 @@ final class DisplayMonitor: NSObject {
         isLockedOrAsleep = false
         logger.debug("System unlocked or woke.")
 
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = nil
+        stopHeartbeatTimer()
 
         if autoOnOnUnlock {
             executePowerOn()
         }
+    }
+
+    private func startHeartbeatTimer() {
+        stopHeartbeatTimer()
+
+        guard autoOffOnLock else {
+            logger.debug("Not starting shutdown heartbeat because auto-off is disabled.")
+            return
+        }
+
+        let timer = Timer.scheduledTimer(withTimeInterval: 900.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isLockedOrAsleep, self.autoOffOnLock else { return }
+                self.executePowerOff()
+            }
+        }
+        timer.tolerance = 60.0
+        heartbeatTimer = timer
+    }
+
+    private func stopHeartbeatTimer() {
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
     }
 
     private func getTargets() -> [String] {
