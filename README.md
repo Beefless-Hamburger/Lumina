@@ -46,7 +46,7 @@ Lumina is not a general display manager. It is a focused automation layer around
 Clone the repository and run:
 
 ```bash
-./build.sh
+bash build.sh
 ```
 
 The app bundle is created at:
@@ -62,13 +62,13 @@ The build script compiles the Swift sources directly with `swiftc`, creates the 
 Run the backend tests:
 
 ```bash
-./test_backend.sh
+bash test_backend.sh
 ```
 
 Run the logic tests:
 
 ```bash
-./test_logic.sh
+bash test_logic.sh
 ```
 
 ## How It Works
