@@ -60,7 +60,8 @@ final class DisplayMonitor: NSObject {
             DistributedNotificationCenter.default().removeObserver(observer)
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
-        stopHeartbeatTimer()
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
     }
 
     func updateMenu() {
