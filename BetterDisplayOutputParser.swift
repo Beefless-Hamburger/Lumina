@@ -10,24 +10,26 @@ func parseDisplayNames(from output: String) -> [String] {
         return names
     }
 
-    if let names = parseDisplayNames(fromWrappedPayload: trimmedOutput) {
-        return names
+    let scan = scanJSONObjectPayloads(in: trimmedOutput)
+    var dictionaries = scan.objects.compactMap(parseDictionary)
+
+    // Recover valid one-line records after an unterminated malformed object.
+    if scan.hasUnterminatedObject {
+        dictionaries.append(contentsOf: trimmedOutput
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line -> [String: Any]? in
+                let cleanedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: ","))
+                return parseDictionary(cleanedLine[...])
+            })
     }
 
-    let dictionaries = trimmedOutput
-        .split(whereSeparator: \.isNewline)
-        .compactMap { line -> [String: Any]? in
-            let cleanedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                .trimmingCharacters(in: CharacterSet(charactersIn: ","))
-
-            guard !cleanedLine.isEmpty, let data = cleanedLine.data(using: .utf8) else {
-                return nil
-            }
-
-            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        }
-
     return extractDisplayNames(from: dictionaries)
+}
+
+private struct JSONObjectScan {
+    let objects: [Substring]
+    let hasUnterminatedObject: Bool
 }
 
 private func parseDisplayNames(fromSinglePayload payload: String) -> [String]? {
@@ -46,32 +48,73 @@ private func parseDisplayNames(fromSinglePayload payload: String) -> [String]? {
     return nil
 }
 
-private func parseDisplayNames(fromWrappedPayload payload: String) -> [String]? {
-    let cleanedPayload = payload
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        .trimmingCharacters(in: CharacterSet(charactersIn: ","))
-
-    guard !cleanedPayload.isEmpty else {
+private func parseDictionary(_ payload: Substring) -> [String: Any]? {
+    guard !payload.isEmpty, let data = String(payload).data(using: .utf8) else {
         return nil
     }
 
-    let wrappedPayload = "[\(cleanedPayload)]"
-    guard let data = wrappedPayload.data(using: .utf8) else {
-        return nil
+    return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+}
+
+private func scanJSONObjectPayloads(in payload: String) -> JSONObjectScan {
+    var objects: [Substring] = []
+    var objectStart: String.Index?
+    var depth = 0
+    var isInsideString = false
+    var isEscaping = false
+
+    for index in payload.indices {
+        let character = payload[index]
+
+        guard objectStart != nil else {
+            if character == "{" {
+                objectStart = index
+                depth = 1
+                isInsideString = false
+                isEscaping = false
+            }
+            continue
+        }
+
+        if isInsideString {
+            if isEscaping {
+                isEscaping = false
+            } else if character == "\\" {
+                isEscaping = true
+            } else if character == "\"" {
+                isInsideString = false
+            }
+            continue
+        }
+
+        switch character {
+        case "\"":
+            isInsideString = true
+        case "{":
+            depth += 1
+        case "}":
+            depth -= 1
+            if depth == 0, let start = objectStart {
+                objects.append(payload[start...index])
+                objectStart = nil
+                isInsideString = false
+                isEscaping = false
+            }
+        default:
+            break
+        }
     }
 
-    guard let dictionaries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-        return nil
-    }
-
-    return extractDisplayNames(from: dictionaries)
+    return JSONObjectScan(objects: objects, hasUnterminatedObject: objectStart != nil)
 }
 
 private func extractDisplayNames(from dictionaries: [[String: Any]]) -> [String] {
     let candidates = dictionaries.compactMap { dictionary -> String? in
-        if let deviceType = dictionary["deviceType"] as? String,
-           deviceType.localizedCaseInsensitiveCompare("Display") != .orderedSame {
-            return nil
+        if let rawDeviceType = dictionary["deviceType"] {
+            guard let deviceType = rawDeviceType as? String,
+                  deviceType.localizedCaseInsensitiveCompare("Display") == .orderedSame else {
+                return nil
+            }
         }
 
         guard let rawName = dictionary["name"] as? String else {
@@ -79,7 +122,8 @@ private func extractDisplayNames(from dictionaries: [[String: Any]]) -> [String]
         }
 
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, name != "Default Group" else {
+        guard !name.isEmpty,
+              name.localizedCaseInsensitiveCompare("Default Group") != .orderedSame else {
             return nil
         }
 
@@ -92,5 +136,11 @@ private func extractDisplayNames(from dictionaries: [[String: Any]]) -> [String]
         uniqueNames.append(name)
     }
 
-    return uniqueNames.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    return uniqueNames.sorted { lhs, rhs in
+        let comparison = lhs.localizedCaseInsensitiveCompare(rhs)
+        if comparison == .orderedSame {
+            return lhs < rhs
+        }
+        return comparison == .orderedAscending
+    }
 }

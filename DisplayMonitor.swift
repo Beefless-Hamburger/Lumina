@@ -6,38 +6,69 @@ import SwiftUI
 
 @MainActor
 final class DisplayMonitor: NSObject {
+    private enum PowerDirection {
+        case on
+        case off
+    }
+
     var availableDisplays: [String] = []
 
     // Settings
     var targetDisplay: String = "" {
-        didSet { UserDefaults.standard.set(targetDisplay, forKey: "TargetDisplay") }
+        didSet {
+            if oldValue != targetDisplay {
+                UserDefaults.standard.set(targetDisplay, forKey: "TargetDisplay")
+            }
+        }
     }
     var targetAllDisplays: Bool = false {
-        didSet { UserDefaults.standard.set(targetAllDisplays, forKey: "TargetAllDisplays") }
+        didSet {
+            if oldValue != targetAllDisplays {
+                UserDefaults.standard.set(targetAllDisplays, forKey: "TargetAllDisplays")
+            }
+        }
     }
     var autoOffOnLock: Bool = true {
-        didSet { UserDefaults.standard.set(autoOffOnLock, forKey: "AutoOffOnLock") }
+        didSet {
+            if oldValue != autoOffOnLock {
+                UserDefaults.standard.set(autoOffOnLock, forKey: "AutoOffOnLock")
+            }
+        }
     }
     var autoOnOnUnlock: Bool = true {
-        didSet { UserDefaults.standard.set(autoOnOnUnlock, forKey: "AutoOnOnUnlock") }
+        didSet {
+            if oldValue != autoOnOnUnlock {
+                UserDefaults.standard.set(autoOnOnUnlock, forKey: "AutoOnOnUnlock")
+            }
+        }
     }
 
     private let logger = Logger(subsystem: "io.github.lumina-app.Lumina", category: "DisplayMonitor")
     private let displayService: any DisplayBackend
+    private let heartbeatController: ShutdownHeartbeatController
     private let appBundleID = "pro.betterdisplay.BetterDisplay"
     private var statusItem: NSStatusItem?
     private var refreshTask: Task<Void, Never>?
     private var powerTask: Task<Void, Never>?
     private var refreshGeneration = 0
     private var powerGeneration = 0
+    private var powerDirection: PowerDirection?
 
     // State & Resource Management
-    private var isLockedOrAsleep = false
-    private var heartbeatTimer: Timer?
+    private var lifecycleState = DisplayLifecycleState()
     private var observers: [NSObjectProtocol] = []
 
-    init(displayBackend: any DisplayBackend = BetterDisplayService(), createStatusItem: Bool = true) {
+    private var isLockedOrAsleep: Bool {
+        lifecycleState.isInactive
+    }
+
+    init(
+        displayBackend: any DisplayBackend = BetterDisplayService(),
+        heartbeatScheduler: any HeartbeatScheduling = FoundationHeartbeatScheduler(),
+        createStatusItem: Bool = true
+    ) {
         self.displayService = displayBackend
+        heartbeatController = ShutdownHeartbeatController(scheduler: heartbeatScheduler)
         super.init()
         loadSettings()
 
@@ -60,8 +91,20 @@ final class DisplayMonitor: NSObject {
             DistributedNotificationCenter.default().removeObserver(observer)
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = nil
+    }
+
+    func cleanup() {
+        refreshTask?.cancel()
+        refreshTask = nil
+        refreshGeneration += 1
+        invalidatePowerOperation()
+        stopHeartbeatTimer()
+
+        for observer in observers {
+            DistributedNotificationCenter.default().removeObserver(observer)
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        observers.removeAll()
     }
 
     func updateMenu() {
@@ -153,19 +196,19 @@ final class DisplayMonitor: NSObject {
 
     @objc func toggleTargetAll() {
         targetAllDisplays.toggle()
+        targetSelectionDidChange()
         updateMenu()
     }
 
     @objc func toggleAutoOff() {
         autoOffOnLock.toggle()
 
-        if isLockedOrAsleep {
-            if autoOffOnLock {
-                executePowerOff()
-                startHeartbeatTimer()
-            } else {
-                stopHeartbeatTimer()
-            }
+        if !autoOffOnLock {
+            invalidatePowerOperation(if: .off)
+            stopHeartbeatTimer()
+        } else if isLockedOrAsleep {
+            executePowerOff()
+            startHeartbeatTimer()
         }
 
         updateMenu()
@@ -173,6 +216,9 @@ final class DisplayMonitor: NSObject {
 
     @objc func toggleAutoOn() {
         autoOnOnUnlock.toggle()
+        if !autoOnOnUnlock {
+            invalidatePowerOperation(if: .on)
+        }
         updateMenu()
     }
 
@@ -203,6 +249,7 @@ final class DisplayMonitor: NSObject {
     }
 
     @objc func terminate() {
+        cleanup()
         NSApplication.shared.terminate(nil)
     }
 
@@ -235,6 +282,7 @@ final class DisplayMonitor: NSObject {
     @objc func selectDisplay(_ sender: NSMenuItem) {
         targetDisplay = sender.title
         targetAllDisplays = false
+        targetSelectionDidChange()
         logger.info("Selected display \(sender.title, privacy: .private).")
         updateMenu()
     }
@@ -254,13 +302,29 @@ final class DisplayMonitor: NSObject {
     }
 
     private func applyDisplayRefresh(_ names: [String]) {
+        let previousTargets = getTargets()
         availableDisplays = names
+        let refreshedTargets = getTargets()
 
         if !targetAllDisplays, !targetDisplay.isEmpty, !availableDisplays.contains(targetDisplay) {
             logger.warning("Selected display \(self.targetDisplay, privacy: .private) is unavailable after refresh.")
         }
 
+        if previousTargets != refreshedTargets {
+            invalidatePowerOperation()
+            if isLockedOrAsleep, autoOffOnLock {
+                executePowerOff()
+            }
+        }
+
         updateMenu()
+    }
+
+    private func targetSelectionDidChange() {
+        invalidatePowerOperation()
+        if isLockedOrAsleep, autoOffOnLock {
+            executePowerOff()
+        }
     }
 
     private func loadSettings() {
@@ -286,23 +350,23 @@ final class DisplayMonitor: NSObject {
         observers.append(dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard self?.shouldAcceptScreenLockNotification() ?? false else { return }
-                self?.handleSleepOrLock()
+                self?.handleLifecycleEvent(.screenLocked)
             }
         })
         observers.append(dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard self?.shouldAcceptScreenUnlockNotification() ?? false else { return }
-                self?.handleWakeOrUnlock()
+                self?.handleLifecycleEvent(.screenUnlocked)
             }
         })
         observers.append(wc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.handleSleepOrLock()
+                self?.handleLifecycleEvent(.systemWillSleep)
             }
         })
         observers.append(wc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.handleWakeOrUnlock()
+                self?.handleLifecycleEvent(.systemDidWake)
             }
         })
     }
@@ -343,62 +407,55 @@ final class DisplayMonitor: NSObject {
         return session["CGSSessionScreenIsLocked"] as? Bool
     }
 
-    func handleSleepOrLock() {
-        guard !isLockedOrAsleep else {
-            logger.debug("Ignoring duplicate sleep or lock notification.")
-            return
-        }
+    func handleLifecycleEvent(_ event: DisplayLifecycleEvent) {
+        let transition = lifecycleState.apply(event)
 
-        isLockedOrAsleep = true
-        logger.debug("System locked or slept.")
+        switch transition {
+        case .becameInactive:
+            logger.debug("System entered a locked or asleep state.")
+            guard autoOffOnLock else {
+                stopHeartbeatTimer()
+                logger.debug("Auto-off on lock/sleep is disabled; skipping shutdown heartbeat.")
+                return
+            }
+            executePowerOff()
+            startHeartbeatTimer()
 
-        guard autoOffOnLock else {
+        case .becameActive:
+            logger.debug("System fully returned from lock and sleep.")
             stopHeartbeatTimer()
-            logger.debug("Auto-off on lock/sleep is disabled; skipping shutdown heartbeat.")
-            return
-        }
+            if autoOnOnUnlock {
+                executePowerOn()
+            }
 
-        executePowerOff()
-        startHeartbeatTimer()
-    }
-
-    func handleWakeOrUnlock() {
-        guard isLockedOrAsleep else {
-            logger.debug("Ignoring duplicate wake or unlock notification.")
-            return
-        }
-
-        isLockedOrAsleep = false
-        logger.debug("System unlocked or woke.")
-
-        stopHeartbeatTimer()
-
-        if autoOnOnUnlock {
-            executePowerOn()
+        case .unchanged:
+            logger.debug("Lifecycle event did not change the combined lock/sleep state.")
+            if isLockedOrAsleep {
+                if autoOffOnLock {
+                    startHeartbeatTimer()
+                } else {
+                    stopHeartbeatTimer()
+                }
+            } else {
+                stopHeartbeatTimer()
+            }
         }
     }
 
     private func startHeartbeatTimer() {
-        stopHeartbeatTimer()
-
-        guard autoOffOnLock else {
-            logger.debug("Not starting shutdown heartbeat because auto-off is disabled.")
+        guard autoOffOnLock, isLockedOrAsleep else {
+            logger.debug("Not starting shutdown heartbeat because shutdown automation is inactive.")
             return
         }
 
-        let timer = Timer.scheduledTimer(withTimeInterval: 900.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, self.isLockedOrAsleep, self.autoOffOnLock else { return }
-                self.executePowerOff()
-            }
+        heartbeatController.start { [weak self] in
+            guard let self, self.isLockedOrAsleep, self.autoOffOnLock else { return }
+            self.executePowerOff()
         }
-        timer.tolerance = 60.0
-        heartbeatTimer = timer
     }
 
     private func stopHeartbeatTimer() {
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = nil
+        heartbeatController.stop()
     }
 
     private func getTargets() -> [String] {
@@ -406,49 +463,87 @@ final class DisplayMonitor: NSObject {
     }
 
     func executePowerOff() {
-        let targets = getTargets()
-        guard !targets.isEmpty else {
-            logger.info("Skipping power-off because no display target is currently resolved.")
-            return
-        }
-
-        powerTask?.cancel()
-        let generation = beginPowerGeneration()
-        let backend = displayService
-        powerTask = Task { [weak self] in
-            await backend.powerOff(targets: targets)
-            await MainActor.run { [weak self] in
-                guard let self, self.isCurrentPowerGeneration(generation) else { return }
-                self.powerTask = nil
-            }
-        }
+        executePower(direction: .off)
     }
 
     func executePowerOn() {
+        executePower(direction: .on)
+    }
+
+    private func executePower(direction: PowerDirection) {
+        invalidatePowerOperation()
         let targets = getTargets()
         guard !targets.isEmpty else {
-            logger.info("Skipping power-on because no display target is currently resolved.")
+            logger.info("Skipping power command because no display target is currently resolved.")
             return
         }
 
-        powerTask?.cancel()
-        let generation = beginPowerGeneration()
+        powerDirection = direction
+        let generation = powerGeneration
         let backend = displayService
         powerTask = Task { [weak self] in
-            await backend.powerOn(targets: targets)
+            let result: DisplayOperationResult
+            switch direction {
+            case .off:
+                result = await backend.powerOff(targets: targets)
+            case .on:
+                result = await backend.powerOn(targets: targets)
+            }
+
+            guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 guard let self, self.isCurrentPowerGeneration(generation) else { return }
+                self.logPowerResult(result, direction: direction)
                 self.powerTask = nil
+                self.powerDirection = nil
             }
         }
     }
 
-    private func beginPowerGeneration() -> Int {
+    private func invalidatePowerOperation(if direction: PowerDirection? = nil) {
+        if let direction, powerDirection != direction {
+            return
+        }
+
+        powerTask?.cancel()
+        powerTask = nil
+        powerDirection = nil
         powerGeneration += 1
-        return powerGeneration
     }
 
     private func isCurrentPowerGeneration(_ generation: Int) -> Bool {
         generation == powerGeneration
+    }
+
+    private func logPowerResult(_ result: DisplayOperationResult, direction: PowerDirection) {
+        let operation = direction == .on ? "power-on" : "power-off"
+
+        switch result.status {
+        case .succeeded:
+            logger.debug("Completed \(operation, privacy: .public) with \(result.attemptedCommandCount, privacy: .public) command(s).")
+        case .noTargets:
+            logger.info("Skipped \(operation, privacy: .public) because no targets were available.")
+        case let .betterDisplayUnavailable(availability):
+            logger.error("Could not complete \(operation, privacy: .public) because BetterDisplay was \(self.availabilityLabel(availability), privacy: .public).")
+        case .superseded:
+            logger.debug("Stopped superseded \(operation, privacy: .public) operation.")
+        case .failed:
+            logger.error("Completed \(operation, privacy: .public) with \(result.failedCommandCount, privacy: .public) failed command(s) out of \(result.attemptedCommandCount, privacy: .public).")
+        }
+    }
+
+    private func availabilityLabel(_ availability: BetterDisplayAvailability) -> String {
+        switch availability {
+        case .running:
+            return "available"
+        case .unavailable:
+            return "not installed"
+        case .launchFailed:
+            return "unable to launch"
+        case .timedOut:
+            return "not ready before the launch timeout"
+        case .cancelled:
+            return "cancelled"
+        }
     }
 }
