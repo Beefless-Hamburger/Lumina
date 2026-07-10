@@ -11,6 +11,7 @@ struct LuminaLogicTests {
         testLifecycleCoordinatorReconciliation()
         testLifecycleCoordinatorOverlapAndDuplicates()
         testDisplayParsing()
+        testDuplicateDisplayNamesRemainDistinct()
         testMalformedAndLargeDisplayPayloads()
         print("Lumina logic tests passed.")
     }
@@ -175,6 +176,18 @@ struct LuminaLogicTests {
         {"deviceType":"Display","name":"default group"}
         """
         expect(parseDisplayNames(from: unicodePayload) == ["Alpha", "alpha", "Écran 東京"], "Unicode parsing and deterministic case-insensitive sorting")
+    }
+
+    private static func testDuplicateDisplayNamesRemainDistinct() {
+        let payload = """
+        {"deviceType":"Display","UUID":"uuid-one","name":"Matching Model"},
+        {"deviceType":"Display","UUID":"uuid-two","name":"Matching Model"},
+        {"deviceType":"DisplayGroup","name":"Default Group"}
+        """
+        let targets = parseDisplayTargets(from: payload)
+        expect(targets.count == 2, "Displays with duplicate names must remain distinct")
+        expect(Set(targets.map(\.identifier)) == ["uuid-one", "uuid-two"], "Each display should preserve its unique selector")
+        expect(targets.map(\.selectionLabel) == ["Matching Model (1)", "Matching Model (2)"], "Duplicate names should receive neutral menu labels")
     }
 
     private static func testMalformedAndLargeDisplayPayloads() {

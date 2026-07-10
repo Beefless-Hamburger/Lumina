@@ -1,5 +1,11 @@
 import Foundation
 
+struct DisplayTarget: Sendable, Equatable {
+    let identifier: String
+    let name: String
+    let selectionLabel: String
+}
+
 enum DisplayLifecycleEvent: Sendable, Equatable {
     case screenLocked
     case screenUnlocked

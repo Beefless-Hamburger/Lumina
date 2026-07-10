@@ -1,13 +1,36 @@
 import Foundation
 
 func parseDisplayNames(from output: String) -> [String] {
+    parseDisplayDictionaries(from: output).compactMap(displayName).uniquedAndSorted()
+}
+
+func parseDisplayTargets(from output: String) -> [DisplayTarget] {
+    let records = parseDisplayDictionaries(from: output).compactMap { dictionary -> (identifier: String, name: String)? in
+        guard let identifier = dictionary["UUID"] as? String,
+              !identifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let name = displayName(from: dictionary) else { return nil }
+        return (identifier.trimmingCharacters(in: .whitespacesAndNewlines), name)
+    }
+    let nameCounts = Dictionary(grouping: records, by: \.name).mapValues(\.count)
+    var nameIndexes: [String: Int] = [:]
+
+    return records.map { record in
+        nameIndexes[record.name, default: 0] += 1
+        let label = nameCounts[record.name, default: 0] > 1
+            ? "\(record.name) (\(nameIndexes[record.name, default: 1]))"
+            : record.name
+        return DisplayTarget(identifier: record.identifier, name: record.name, selectionLabel: label)
+    }.sorted { $0.selectionLabel.localizedCaseInsensitiveCompare($1.selectionLabel) == .orderedAscending }
+}
+
+private func parseDisplayDictionaries(from output: String) -> [[String: Any]] {
     let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmedOutput.isEmpty else {
         return []
     }
 
-    if let names = parseDisplayNames(fromSinglePayload: trimmedOutput) {
-        return names
+    if let dictionaries = parseDictionaries(fromSinglePayload: trimmedOutput) {
+        return dictionaries
     }
 
     let scan = scanJSONObjectPayloads(in: trimmedOutput)
@@ -24,7 +47,7 @@ func parseDisplayNames(from output: String) -> [String] {
             })
     }
 
-    return extractDisplayNames(from: dictionaries)
+    return dictionaries
 }
 
 private struct JSONObjectScan {
@@ -32,17 +55,17 @@ private struct JSONObjectScan {
     let hasUnterminatedObject: Bool
 }
 
-private func parseDisplayNames(fromSinglePayload payload: String) -> [String]? {
+private func parseDictionaries(fromSinglePayload payload: String) -> [[String: Any]]? {
     guard let data = payload.data(using: .utf8) else {
         return nil
     }
 
     if let dictionaries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-        return extractDisplayNames(from: dictionaries)
+        return dictionaries
     }
 
     if let dictionary = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-        return extractDisplayNames(from: [dictionary])
+        return [dictionary]
     }
 
     return nil
@@ -109,7 +132,10 @@ private func scanJSONObjectPayloads(in payload: String) -> JSONObjectScan {
 }
 
 private func extractDisplayNames(from dictionaries: [[String: Any]]) -> [String] {
-    let candidates = dictionaries.compactMap { dictionary -> String? in
+    dictionaries.compactMap(displayName).uniquedAndSorted()
+}
+
+private func displayName(from dictionary: [String: Any]) -> String? {
         if let rawDeviceType = dictionary["deviceType"] {
             guard let deviceType = rawDeviceType as? String,
                   deviceType.localizedCaseInsensitiveCompare("Display") == .orderedSame else {
@@ -128,19 +154,17 @@ private func extractDisplayNames(from dictionaries: [[String: Any]]) -> [String]
         }
 
         return name
-    }
+}
 
-    var seenNames = Set<String>()
-    var uniqueNames: [String] = []
-    for name in candidates where seenNames.insert(name).inserted {
-        uniqueNames.append(name)
-    }
-
-    return uniqueNames.sorted { lhs, rhs in
+private extension Array where Element == String {
+    func uniquedAndSorted() -> [String] {
+        var seenNames = Set<String>()
+        return filter { seenNames.insert($0).inserted }.sorted { lhs, rhs in
         let comparison = lhs.localizedCaseInsensitiveCompare(rhs)
         if comparison == .orderedSame {
             return lhs < rhs
         }
         return comparison == .orderedAscending
+        }
     }
 }

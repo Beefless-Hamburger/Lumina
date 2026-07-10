@@ -19,7 +19,7 @@ actor BetterDisplayService: DisplayBackend {
         self.sleeper = sleeper
     }
 
-    func refreshDisplayNames() async -> [String] {
+    func refreshDisplayTargets() async -> [DisplayTarget] {
         let availability = await transport.ensureRunning(context: "refresh displays")
         guard availability.isAvailable else {
             return []
@@ -30,14 +30,14 @@ actor BetterDisplayService: DisplayBackend {
             return []
         }
 
-        let names = parseDisplayNames(from: result.output)
-        guard !names.isEmpty else {
+        let targets = parseDisplayTargets(from: result.output)
+        guard !targets.isEmpty else {
             logger.warning("BetterDisplay returned no display identifiers or an unsupported payload.")
             return []
         }
 
-        logger.debug("Refreshed \(names.count, privacy: .public) display names.")
-        return names
+        logger.debug("Refreshed \(targets.count, privacy: .public) display targets.")
+        return targets
     }
 
     func powerOff(targets requestedTargets: [String]) async -> DisplayOperationResult {
@@ -62,8 +62,8 @@ actor BetterDisplayService: DisplayBackend {
 
         for display in targets {
             let commands = [
-                (["set", "-name=\(display)", "-connected=off"], "power off connected for \(display)"),
-                (["set", "-name=\(display)", "-ddc", "-vcp=powerMode", "-value=4"], "power off DDC for \(display)")
+                (["set", "-UUID=\(display)", "-connected=off"], "power off connected"),
+                (["set", "-UUID=\(display)", "-ddc", "-vcp=powerMode", "-value=4"], "power off DDC")
             ]
 
             for (arguments, context) in commands {
@@ -109,8 +109,8 @@ actor BetterDisplayService: DisplayBackend {
         for display in targets {
             attemptedCommands += 1
             switch await executeCommand(
-                arguments: ["set", "-name=\(display)", "-connected=on"],
-                context: "power on connected for \(display)",
+                arguments: ["set", "-UUID=\(display)", "-connected=on"],
+                context: "power on connected",
                 sequence: sequence
             ) {
             case .succeeded:
@@ -127,8 +127,8 @@ actor BetterDisplayService: DisplayBackend {
 
             attemptedCommands += 1
             switch await executeCommand(
-                arguments: ["set", "-name=\(display)", "-ddc", "-vcp=powerMode", "-value=1"],
-                context: "power on DDC for \(display)",
+                arguments: ["set", "-UUID=\(display)", "-ddc", "-vcp=powerMode", "-value=1"],
+                context: "power on DDC",
                 sequence: sequence
             ) {
             case .succeeded:
@@ -155,8 +155,8 @@ actor BetterDisplayService: DisplayBackend {
         for display in connectedTargets {
             attemptedCommands += 1
             switch await executeCommand(
-                arguments: ["perform", "-name=\(display)", "-reinitialize"],
-                context: "power on reinitialize for \(display)",
+                arguments: ["perform", "-UUID=\(display)", "-reinitialize"],
+                context: "power on reinitialize",
                 sequence: sequence
             ) {
             case .succeeded:
@@ -177,8 +177,8 @@ actor BetterDisplayService: DisplayBackend {
 
         for display in connectedTargets {
             let commands = [
-                (["set", "-name=\(display)", "-hardwareBacklight=on"], "power on backlight for \(display)"),
-                (["set", "-name=\(display)", "-ddc", "-vcp=powerMode", "-value=1"], "power on final DDC for \(display)")
+                (["set", "-UUID=\(display)", "-hardwareBacklight=on"], "power on backlight"),
+                (["set", "-UUID=\(display)", "-ddc", "-vcp=powerMode", "-value=1"], "power on final DDC")
             ]
 
             for (arguments, context) in commands {

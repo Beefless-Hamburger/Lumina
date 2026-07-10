@@ -12,6 +12,14 @@ final class DisplayMonitor: NSObject {
     }
 
     var availableDisplays: [String] = []
+    private var availableDisplayTargets: [DisplayTarget] = []
+    private var targetDisplayIdentifier: String = "" {
+        didSet {
+            if oldValue != targetDisplayIdentifier {
+                UserDefaults.standard.set(targetDisplayIdentifier, forKey: "TargetDisplayIdentifier")
+            }
+        }
+    }
 
     // Settings
     var targetDisplay: String = "" {
@@ -177,7 +185,10 @@ final class DisplayMonitor: NSObject {
             for name in availableDisplays {
                 let item = NSMenuItem(title: name, action: #selector(selectDisplay(_:)), keyEquivalent: "")
                 item.target = self
-                item.state = (!targetAllDisplays && name == targetDisplay) ? .on : .off
+                if let target = availableDisplayTargets.first(where: { $0.selectionLabel == name }) {
+                    item.representedObject = target.identifier
+                    item.state = (!targetAllDisplays && target.identifier == targetDisplayIdentifier) ? .on : .off
+                }
                 item.isEnabled = !targetAllDisplays
                 displayMenu.addItem(item)
             }
@@ -292,6 +303,7 @@ final class DisplayMonitor: NSObject {
 
     @objc func selectDisplay(_ sender: NSMenuItem) {
         targetDisplay = sender.title
+        targetDisplayIdentifier = sender.representedObject as? String ?? ""
         targetAllDisplays = false
         targetSelectionDidChange()
         logger.info("Selected display \(sender.title, privacy: .private).")
@@ -303,21 +315,33 @@ final class DisplayMonitor: NSObject {
         let generation = beginRefreshGeneration()
         let backend = displayService
         refreshTask = Task { [weak self] in
-            let names = await backend.refreshDisplayNames()
+            let targets = await backend.refreshDisplayTargets()
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 guard let self, self.isCurrentRefresh(generation) else { return }
-                self.applyDisplayRefresh(names)
+                self.applyDisplayRefresh(targets)
             }
         }
     }
 
-    private func applyDisplayRefresh(_ names: [String]) {
+    private func applyDisplayRefresh(_ targets: [DisplayTarget]) {
         let previousTargets = getTargets()
-        availableDisplays = names
+        availableDisplayTargets = targets
+        availableDisplays = targets.map(\.selectionLabel)
+
+        if targetDisplayIdentifier.isEmpty, !targetDisplay.isEmpty {
+            let legacyMatches = targets.filter { $0.name == targetDisplay || $0.selectionLabel == targetDisplay }
+            if legacyMatches.count == 1, let match = legacyMatches.first {
+                targetDisplayIdentifier = match.identifier
+                targetDisplay = match.selectionLabel
+            }
+        } else if let selected = targets.first(where: { $0.identifier == targetDisplayIdentifier }) {
+            targetDisplay = selected.selectionLabel
+        }
         let refreshedTargets = getTargets()
 
-        if !targetAllDisplays, !targetDisplay.isEmpty, !availableDisplays.contains(targetDisplay) {
+        if !targetAllDisplays, !targetDisplayIdentifier.isEmpty,
+           !availableDisplayTargets.contains(where: { $0.identifier == targetDisplayIdentifier }) {
             logger.warning("Selected display \(self.targetDisplay, privacy: .private) is unavailable after refresh.")
         }
 
@@ -340,6 +364,7 @@ final class DisplayMonitor: NSObject {
 
     private func loadSettings() {
         targetDisplay = UserDefaults.standard.string(forKey: "TargetDisplay") ?? ""
+        targetDisplayIdentifier = UserDefaults.standard.string(forKey: "TargetDisplayIdentifier") ?? ""
         targetAllDisplays = UserDefaults.standard.bool(forKey: "TargetAllDisplays")
         autoOffOnLock = UserDefaults.standard.object(forKey: "AutoOffOnLock") as? Bool ?? true
         autoOnOnUnlock = UserDefaults.standard.object(forKey: "AutoOnOnUnlock") as? Bool ?? true
@@ -531,7 +556,13 @@ final class DisplayMonitor: NSObject {
     }
 
     private func getTargets() -> [String] {
-        resolvedTargets(targetAllDisplays: targetAllDisplays, targetDisplay: targetDisplay, availableDisplays: availableDisplays)
+        if targetAllDisplays {
+            return availableDisplayTargets.map(\.identifier)
+        }
+        guard availableDisplayTargets.contains(where: { $0.identifier == targetDisplayIdentifier }) else {
+            return []
+        }
+        return [targetDisplayIdentifier]
     }
 
     func executePowerOff() {
