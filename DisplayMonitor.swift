@@ -530,7 +530,7 @@ final class DisplayMonitor: NSObject {
         case .noTargets:
             logger.info("Skipped \(operation, privacy: .public) because no targets were available.")
         case let .betterDisplayUnavailable(availability):
-            logger.error("Could not complete \(operation, privacy: .public) because BetterDisplay was \(availabilityLabel(availability), privacy: .public).")
+            logger.error("Could not complete \(operation, privacy: .public) because BetterDisplay was \(self.availabilityLabel(availability), privacy: .public).")
         case .superseded:
             logger.debug("Stopped superseded \(operation, privacy: .public) operation.")
         case .failed:
