@@ -10,6 +10,7 @@ struct LuminaLogicTests {
         testLifecycleCoordinatorRepeatedCycles()
         testLifecycleCoordinatorReconciliation()
         testLifecycleCoordinatorOverlapAndDuplicates()
+        testHDRBrightnessPreferencePersistence()
         testDisplayParsing()
         testDuplicateDisplayNamesRemainDistinct()
         testMalformedAndLargeDisplayPayloads()
@@ -119,6 +120,21 @@ struct LuminaLogicTests {
         expect(coordinator.receive(.screenUnlocked, sessionScreenIsLocked: false).action == .none, "Unlock while asleep must not power on")
         expect(coordinator.receive(.systemDidWake).action == .powerOn, "Wake after unlock should power on")
         expect(coordinator.receive(.systemDidWake).action == .none, "Duplicate wake should not issue another command")
+    }
+
+    private static func testHDRBrightnessPreferencePersistence() {
+        let suiteName = "LuminaLogicTests-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            expect(false, "Test UserDefaults suite should be available")
+            return
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        expect(!loadRestoreHDRBrightnessPreference(from: defaults), "HDR brightness recovery should default to disabled")
+        saveRestoreHDRBrightnessPreference(true, to: defaults)
+        expect(loadRestoreHDRBrightnessPreference(from: defaults), "HDR brightness recovery should persist enabled state")
+        saveRestoreHDRBrightnessPreference(false, to: defaults)
+        expect(!loadRestoreHDRBrightnessPreference(from: defaults), "HDR brightness recovery should persist disabled state")
     }
 
     private static func testDisplayParsing() {

@@ -50,6 +50,13 @@ final class DisplayMonitor: NSObject {
             }
         }
     }
+    var restoreHDRBrightnessAfterWake: Bool = false {
+        didSet {
+            if oldValue != restoreHDRBrightnessAfterWake {
+                saveRestoreHDRBrightnessPreference(restoreHDRBrightnessAfterWake, to: .standard)
+            }
+        }
+    }
 
     private let logger = Logger(subsystem: "io.github.lumina-app.Lumina", category: "DisplayMonitor")
     private let displayService: any DisplayBackend
@@ -170,6 +177,11 @@ final class DisplayMonitor: NSObject {
         autoOnItem.state = autoOnOnUnlock ? .on : .off
         menu.addItem(autoOnItem)
 
+        let brightnessItem = NSMenuItem(title: "Restore HDR Brightness After Wake", action: #selector(toggleHDRBrightnessRecovery), keyEquivalent: "")
+        brightnessItem.target = self
+        brightnessItem.state = restoreHDRBrightnessAfterWake ? .on : .off
+        menu.addItem(brightnessItem)
+
         let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         loginItem.target = self
         loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
@@ -241,6 +253,12 @@ final class DisplayMonitor: NSObject {
         if !autoOnOnUnlock {
             invalidatePowerOperation(if: .on)
         }
+        updateMenu()
+    }
+
+    @objc func toggleHDRBrightnessRecovery() {
+        restoreHDRBrightnessAfterWake.toggle()
+        logger.info("HDR brightness recovery setting changed; enabled=\(self.restoreHDRBrightnessAfterWake, privacy: .public).")
         updateMenu()
     }
 
@@ -368,6 +386,7 @@ final class DisplayMonitor: NSObject {
         targetAllDisplays = UserDefaults.standard.bool(forKey: "TargetAllDisplays")
         autoOffOnLock = UserDefaults.standard.object(forKey: "AutoOffOnLock") as? Bool ?? true
         autoOnOnUnlock = UserDefaults.standard.object(forKey: "AutoOnOnUnlock") as? Bool ?? true
+        restoreHDRBrightnessAfterWake = loadRestoreHDRBrightnessPreference(from: .standard)
     }
 
     private func beginRefreshGeneration() -> Int {
@@ -485,7 +504,7 @@ final class DisplayMonitor: NSObject {
             logger.debug("System fully returned from lock and sleep.")
             stopHeartbeatTimer()
             if autoOnOnUnlock {
-                executePowerOn()
+                executePowerOn(restoreHDRBrightness: true)
             }
 
         case .unchanged:
@@ -569,11 +588,11 @@ final class DisplayMonitor: NSObject {
         executePower(direction: .off)
     }
 
-    func executePowerOn() {
-        executePower(direction: .on)
+    func executePowerOn(restoreHDRBrightness: Bool = false) {
+        executePower(direction: .on, restoreHDRBrightness: restoreHDRBrightness)
     }
 
-    private func executePower(direction: PowerDirection) {
+    private func executePower(direction: PowerDirection, restoreHDRBrightness: Bool = false) {
         let cancelledExistingTask = powerTask != nil
         invalidatePowerOperation()
         let targets = getTargets()
@@ -585,6 +604,7 @@ final class DisplayMonitor: NSObject {
         powerDirection = direction
         let generation = powerGeneration
         let operation = direction == .on ? "power-on" : "power-off"
+        let shouldRestoreHDRBrightness = restoreHDRBrightness && restoreHDRBrightnessAfterWake
         logger.debug("Requesting \(operation, privacy: .public), generation=\(generation, privacy: .public), cancelledExistingTask=\(cancelledExistingTask, privacy: .public), targetCount=\(targets.count, privacy: .public).")
         let backend = displayService
         powerTask = Task { [weak self] in
@@ -593,7 +613,10 @@ final class DisplayMonitor: NSObject {
             case .off:
                 result = await backend.powerOff(targets: targets)
             case .on:
-                result = await backend.powerOn(targets: targets)
+                result = await backend.powerOn(
+                    targets: targets,
+                    restoreHDRBrightness: shouldRestoreHDRBrightness
+                )
             }
 
             guard !Task.isCancelled else { return }

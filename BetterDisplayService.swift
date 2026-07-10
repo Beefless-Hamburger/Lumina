@@ -2,6 +2,8 @@ import Foundation
 import os
 
 actor BetterDisplayService: DisplayBackend {
+    private static let fullBrightness = "1.0"
+
     private enum CommandDecision {
         case succeeded
         case recoverableFailure
@@ -85,7 +87,7 @@ actor BetterDisplayService: DisplayBackend {
         return completedResult(attemptedCommands: attemptedCommands, failedCommands: failedCommands)
     }
 
-    func powerOn(targets requestedTargets: [String]) async -> DisplayOperationResult {
+    func powerOn(targets requestedTargets: [String], restoreHDRBrightness: Bool = false) async -> DisplayOperationResult {
         let targets = normalizedTargets(requestedTargets)
         let sequence = beginPowerSequence(label: "power on", targets: targets)
 
@@ -195,6 +197,54 @@ actor BetterDisplayService: DisplayBackend {
                     return supersededResult(attemptedCommands: attemptedCommands, failedCommands: failedCommands)
                 }
             }
+        }
+
+        if restoreHDRBrightness {
+            for (index, display) in connectedTargets.enumerated() {
+                guard shouldContinue(sequence, label: "HDR brightness qualification") else {
+                    return supersededResult(attemptedCommands: attemptedCommands, failedCommands: failedCommands)
+                }
+
+                logger.debug("Checking HDR brightness recovery qualification for target index \(index, privacy: .public).")
+                let hdrResult = await transport.run(
+                    arguments: ["get", "-UUID=\(display)", "-hdr", "-value"],
+                    context: "check HDR state",
+                    captureOutput: true
+                )
+                guard shouldContinue(sequence, label: "HDR brightness qualification") else {
+                    return supersededResult(attemptedCommands: attemptedCommands, failedCommands: failedCommands)
+                }
+
+                guard hdrResult.succeeded else {
+                    logger.warning("HDR detection was unavailable for target index \(index, privacy: .public); skipping brightness recovery.")
+                    continue
+                }
+                guard hdrResult.output.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "on" else {
+                    logger.debug("Target index \(index, privacy: .public) did not qualify for HDR brightness recovery.")
+                    continue
+                }
+
+                attemptedCommands += 1
+                logger.debug("Attempting HDR brightness recovery for target index \(index, privacy: .public).")
+                switch await executeCommand(
+                    arguments: ["set", "-UUID=\(display)", "-brightness=\(Self.fullBrightness)"],
+                    context: "restore HDR brightness",
+                    sequence: sequence
+                ) {
+                case .succeeded:
+                    logger.debug("HDR brightness recovery succeeded for target index \(index, privacy: .public).")
+                case .recoverableFailure:
+                    failedCommands += 1
+                    logger.warning("HDR brightness recovery failed for target index \(index, privacy: .public).")
+                case .terminalFailure:
+                    failedCommands += 1
+                    logger.warning("HDR brightness recovery could not complete for target index \(index, privacy: .public).")
+                case .superseded:
+                    return supersededResult(attemptedCommands: attemptedCommands, failedCommands: failedCommands)
+                }
+            }
+        } else {
+            logger.debug("HDR brightness recovery is disabled; wake sequence is unchanged.")
         }
 
         return completedResult(attemptedCommands: attemptedCommands, failedCommands: failedCommands)

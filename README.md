@@ -28,6 +28,7 @@ It is intentionally narrow in scope. Lumina is not a general display manager and
 
 - **Automatic shutdown:** Disconnects selected displays and sends a DDC power-off command when macOS locks or sleeps.
 - **Staged wake recovery:** Reconnects displays, powers them on through DDC, reinitializes them, restores hardware backlight state, and sends a final power-on command.
+- **Optional HDR brightness recovery:** After an automatic wake recovery, restores qualified HDR displays to 100% brightness.
 - **Independent automation controls:** Enable or disable shutdown and wake automation separately.
 - **Flexible targeting:** Control one selected display or every display reported by BetterDisplay.
 - **Manual recovery controls:** Force power on or off directly from the menu bar.
@@ -70,7 +71,8 @@ Each release includes a `.sha256` checksum file for verifying the DMG download.
 3. Alternatively, enable **Target All Displays**.
 4. Leave **Auto-off on Lock/Sleep** and **Auto-on on Unlock/Wake** enabled.
 5. Use **Force Power Off** and **Force Power On** once to confirm that your display path supports the sequence.
-6. Enable **Launch at Login** after confirming the configuration works.
+6. If an HDR display wakes unusually dim, enable **Restore HDR Brightness After Wake**. This option is disabled by default.
+7. Enable **Launch at Login** after confirming the configuration works.
 
 Lumina runs as a menu bar utility and does not create a Dock icon.
 
@@ -83,6 +85,7 @@ Lumina runs as a menu bar utility and does not create a Dock icon.
 | **Target All Displays** | Applies commands to every supported display found by BetterDisplay. |
 | **Auto-off on Lock/Sleep** | Runs the shutdown sequence when the Mac locks or enters sleep. |
 | **Auto-on on Unlock/Wake** | Runs the recovery sequence after the Mac is both awake and unlocked. |
+| **Restore HDR Brightness After Wake** | When enabled, detects HDR per display after automatic recovery and asks BetterDisplay to set qualified displays to 100% brightness. |
 | **Launch at Login** | Registers or removes Lumina as a macOS login item. |
 | **Select Specific Display** | Selects one BetterDisplay display identifier as the target. |
 | **Refresh Displays** | Reloads the display list from BetterDisplay. |
@@ -112,9 +115,12 @@ reinitialize
 wait 2 seconds
 hardwareBacklight=on
 ddc powerMode=1
+[if enabled and HDR is on] brightness=1.0
 ```
 
 The delays are intentional. Some monitors need time to re-establish their connection before accepting reinitialization and backlight commands.
+
+HDR brightness recovery is manually enabled and runs only after an automatic unlock/wake transition; it does not run at app launch or with **Force Power On**. Lumina queries BetterDisplay's per-display `hdr` value after the normal wake stages. For displays reporting HDR on, it sets BetterDisplay's normalized `brightness` value to `1.0` (100%). BetterDisplay chooses the available hardware, software, or combined brightness mechanism. The HDR query provides a serialized readiness round-trip, so Lumina does not add another fixed delay or retry loop. A brightness failure is reported but does not prevent other displays or later lifecycle cycles from continuing.
 
 ## Reliability Design
 
@@ -150,6 +156,13 @@ Display lifecycle notifications can arrive more than once, overlap, or occur out
 - Confirm that BetterDisplay can reconnect and reinitialize the display manually.
 - Test a direct connection if the display is currently routed through a dock or adapter.
 - Some displays ignore hardware backlight or DDC power commands even when connection toggling works.
+
+### An HDR display wakes at very low brightness
+
+- Enable **Restore HDR Brightness After Wake** in Lumina's menu.
+- The option can force each selected display that BetterDisplay reports as HDR to 100% after automatic wake recovery.
+- Disable the option if you do not want Lumina to change brightness after waking.
+- BetterDisplay chooses the brightness control mechanism, so results vary with the display, DDC support, dock, adapter, and cable path. Lumina does not claim universal HDR brightness support.
 
 ### Launch at Login does not remain enabled
 

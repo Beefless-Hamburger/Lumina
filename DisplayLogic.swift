@@ -6,6 +6,16 @@ struct DisplayTarget: Sendable, Equatable {
     let selectionLabel: String
 }
 
+private let restoreHDRBrightnessDefaultsKey = "RestoreHDRBrightnessAfterWake"
+
+func loadRestoreHDRBrightnessPreference(from defaults: UserDefaults) -> Bool {
+    defaults.bool(forKey: restoreHDRBrightnessDefaultsKey)
+}
+
+func saveRestoreHDRBrightnessPreference(_ enabled: Bool, to defaults: UserDefaults) {
+    defaults.set(enabled, forKey: restoreHDRBrightnessDefaultsKey)
+}
+
 enum DisplayLifecycleEvent: Sendable, Equatable {
     case screenLocked
     case screenUnlocked

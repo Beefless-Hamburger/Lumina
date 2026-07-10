@@ -23,5 +23,5 @@ struct DisplayOperationResult: Sendable, Equatable {
 protocol DisplayBackend: Sendable {
     func refreshDisplayTargets() async -> [DisplayTarget]
     func powerOff(targets: [String]) async -> DisplayOperationResult
-    func powerOn(targets: [String]) async -> DisplayOperationResult
+    func powerOn(targets: [String], restoreHDRBrightness: Bool) async -> DisplayOperationResult
 }
