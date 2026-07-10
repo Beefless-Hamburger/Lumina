@@ -68,7 +68,15 @@ jobs:
           show-progress: false
 
       - name: Build app bundle
-        run: BUILD_TARGET="$(uname -m)-apple-macosx13.0" bash build.sh
+        run: |
+          if BUILD_TARGET="$(uname -m)-apple-macosx13.0" bash build.sh >build.log 2>&1; then
+            cat build.log
+          else
+            printf 'Build failed: '
+            tr '\n' ' ' <build.log
+            printf '\n'
+            exit 1
+          fi
 
       - name: Verify app bundle
         run: |
