@@ -1,9 +1,20 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 APP_NAME="Lumina"
 BUILD_DIR="Build"
 BUILD_TARGET="${BUILD_TARGET:-arm64-apple-macosx13.0}"
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/LuminaBuild.XXXXXX")"
+STAGED_APP="$STAGING_DIR/$APP_NAME.app"
+FINAL_APP="$BUILD_DIR/$APP_NAME.app"
+
+cleanup() {
+    rm -rf "$STAGING_DIR"
+}
+trap cleanup EXIT
 
 clean_bundle_metadata() {
     local bundle_path="$1"
@@ -17,38 +28,48 @@ clean_bundle_metadata() {
     xattr -d 'com.apple.fileprovider.fpfs#P' "$bundle_path" 2>/dev/null || true
 }
 
-# Cleanup
-rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR/$APP_NAME.app/Contents/MacOS"
-mkdir -p "$BUILD_DIR/$APP_NAME.app/Contents/Resources"
+mkdir -p "$STAGED_APP/Contents/MacOS"
+mkdir -p "$STAGED_APP/Contents/Resources"
+
+SOURCES=(
+    AppDelegate.swift
+    DisplayBackend.swift
+    BetterDisplayTransport.swift
+    AsyncProcessRunner.swift
+    BetterDisplayOutputParser.swift
+    AboutView.swift
+    BetterDisplayService.swift
+    DisplayLogic.swift
+    DisplaySleeper.swift
+    ShutdownHeartbeatController.swift
+    DisplayMonitor.swift
+    LuminaApp.swift
+    SystemBetterDisplayTransport.swift
+    VisualEffectView.swift
+)
+
+SWIFT_FLAGS=(
+    -swift-version 5
+    -warn-concurrency
+    -strict-concurrency=complete
+)
 
 echo "Compiling for $BUILD_TARGET..."
-swiftc AppDelegate.swift \
-    DisplayBackend.swift \
-    BetterDisplayTransport.swift \
-    BetterDisplayOutputParser.swift \
-    AboutView.swift \
-    BetterDisplayService.swift \
-    DisplayLogic.swift \
-    DisplaySleeper.swift \
-    DisplayMonitor.swift \
-    LuminaApp.swift \
-    SystemBetterDisplayTransport.swift \
-    VisualEffectView.swift \
-    -o "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME" \
+swiftc "${SOURCES[@]}" \
+    -o "$STAGED_APP/Contents/MacOS/$APP_NAME" \
     -target "$BUILD_TARGET" \
     -framework SwiftUI \
     -framework AppKit \
     -framework Combine \
-    -O
+    -O \
+    "${SWIFT_FLAGS[@]}"
 
-# Copy icon
 if [ -f "AppIcon.icns" ]; then
-    cp AppIcon.icns "$BUILD_DIR/$APP_NAME.app/Contents/Resources/"
+    cp AppIcon.icns "$STAGED_APP/Contents/Resources/"
 fi
 
 echo "Creating Info.plist..."
-cat > "$BUILD_DIR/$APP_NAME.app/Contents/Info.plist" <<EOF
+cat > "$STAGED_APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -63,6 +84,8 @@ cat > "$BUILD_DIR/$APP_NAME.app/Contents/Info.plist" <<EOF
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSPrincipalClass</key>
@@ -77,15 +100,18 @@ cat > "$BUILD_DIR/$APP_NAME.app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# Ensure it's executable
-chmod +x "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+chmod +x "$STAGED_APP/Contents/MacOS/$APP_NAME"
 
 # Cloud-synced folders can add extended attributes that codesign rejects.
-clean_bundle_metadata "$BUILD_DIR/$APP_NAME.app"
+clean_bundle_metadata "$STAGED_APP"
 
-# Ad-hoc sign the application bundle so macOS trusts it
 echo "Signing application..."
-codesign --force --deep --sign - "$BUILD_DIR/$APP_NAME.app"
-clean_bundle_metadata "$BUILD_DIR/$APP_NAME.app"
+codesign --force --deep --sign - "$STAGED_APP"
+clean_bundle_metadata "$STAGED_APP"
+codesign --verify --deep --strict "$STAGED_APP"
 
-echo "Build complete: $BUILD_DIR/$APP_NAME.app"
+rm -rf "$FINAL_APP"
+mkdir -p "$BUILD_DIR"
+mv "$STAGED_APP" "$FINAL_APP"
+
+echo "Build complete: $FINAL_APP"
