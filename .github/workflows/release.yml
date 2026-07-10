@@ -1,0 +1,129 @@
+name: Release DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, such as 1.0.1
+        required: true
+        default: 1.0.0
+  push:
+    branches:
+      - main
+    paths:
+      - .github/release-version
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish universal DMG
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REQUESTED_VERSION: ${{ inputs.version }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          show-progress: false
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            VERSION="$REQUESTED_VERSION"
+          else
+            VERSION="$(tr -d '[:space:]' < .github/release-version)"
+          fi
+
+          VERSION="${VERSION#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release version: $VERSION" >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check for existing release
+        id: existing
+        shell: bash
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release ${{ steps.version.outputs.tag }} already exists; nothing to publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate scripts and run tests
+        if: steps.existing.outputs.exists != 'true'
+        run: |
+          bash -n build.sh package_dmg.sh test_logic.sh test_backend.sh
+          bash test_logic.sh
+          bash test_backend.sh
+
+      - name: Build universal DMG
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          APP_BUILD: ${{ github.run_number }}
+        run: bash package_dmg.sh
+
+      - name: Inspect release package
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          test -f "dist/Lumina-$VERSION.dmg"
+          test -f "dist/Lumina-$VERSION.dmg.sha256"
+          hdiutil verify "dist/Lumina-$VERSION.dmg"
+          cat "dist/Lumina-$VERSION.dmg.sha256"
+
+      - name: Prepare release notes
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cat > release-notes.md <<EOF
+          ## Install Lumina
+
+          1. Download **Lumina-$VERSION.dmg** below.
+          2. Open the DMG and drag **Lumina.app** into **Applications**.
+          3. Install [BetterDisplay](https://github.com/waydabber/BetterDisplay) in `/Applications` if it is not already installed.
+          4. Open Lumina from Applications and select the display you want it to manage.
+
+          This DMG contains a universal macOS application for Apple Silicon and Intel Macs running macOS 13 or later.
+
+          ### macOS security note
+
+          Lumina is currently ad-hoc signed rather than Apple-notarized. The first time you open it, Control-click **Lumina.app**, choose **Open**, and confirm. You may also approve it under **System Settings → Privacy & Security**.
+
+          The accompanying `.sha256` file can be used to verify the DMG download.
+          EOF
+
+      - name: Publish GitHub release
+        if: steps.existing.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            "dist/Lumina-$VERSION.dmg#Lumina $VERSION universal DMG" \
+            "dist/Lumina-$VERSION.dmg.sha256#SHA-256 checksum" \
+            --target "$GITHUB_SHA" \
+            --title "Lumina $VERSION" \
+            --notes-file release-notes.md \
+            --latest
