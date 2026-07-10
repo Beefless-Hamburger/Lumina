@@ -13,6 +13,26 @@ enum DisplayLifecycleTransition: Sendable, Equatable {
     case unchanged
 }
 
+enum ScreenNotificationDisposition: Sendable, Equatable {
+    case accepted
+    case delayed
+    case ignored
+}
+
+enum DisplayLifecycleAction: Sendable, Equatable {
+    case powerOff
+    case powerOn
+    case none
+}
+
+struct DisplayLifecycleOutcome: Sendable, Equatable {
+    let disposition: ScreenNotificationDisposition
+    let transition: DisplayLifecycleTransition?
+    let action: DisplayLifecycleAction
+    let stateBefore: DisplayLifecycleState
+    let stateAfter: DisplayLifecycleState
+}
+
 struct DisplayLifecycleState: Sendable, Equatable {
     private(set) var isScreenLocked = false
     private(set) var isSystemAsleep = false
@@ -42,6 +62,61 @@ struct DisplayLifecycleState: Sendable, Equatable {
             return .becameActive
         default:
             return .unchanged
+        }
+    }
+}
+
+struct DisplayLifecycleCoordinator: Sendable {
+    private(set) var state = DisplayLifecycleState()
+
+    mutating func receive(
+        _ event: DisplayLifecycleEvent,
+        sessionScreenIsLocked: Bool? = nil,
+        finalReconciliationAttempt: Bool = true
+    ) -> DisplayLifecycleOutcome {
+        let stateBefore = state
+        if let expectedLockState = event.expectedSessionLockState,
+           let sessionScreenIsLocked,
+           sessionScreenIsLocked != expectedLockState {
+            return DisplayLifecycleOutcome(
+                disposition: finalReconciliationAttempt ? .ignored : .delayed,
+                transition: nil,
+                action: .none,
+                stateBefore: stateBefore,
+                stateAfter: state
+            )
+        }
+
+        let transition = state.apply(event)
+        let action: DisplayLifecycleAction
+        switch transition {
+        case .becameInactive:
+            action = .powerOff
+        case .becameActive:
+            action = .powerOn
+        case .unchanged:
+            action = .none
+        }
+
+        return DisplayLifecycleOutcome(
+            disposition: .accepted,
+            transition: transition,
+            action: action,
+            stateBefore: stateBefore,
+            stateAfter: state
+        )
+    }
+}
+
+private extension DisplayLifecycleEvent {
+    var expectedSessionLockState: Bool? {
+        switch self {
+        case .screenLocked:
+            return true
+        case .screenUnlocked:
+            return false
+        case .systemWillSleep, .systemDidWake:
+            return nil
         }
     }
 }

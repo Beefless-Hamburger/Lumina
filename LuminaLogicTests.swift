@@ -7,6 +7,9 @@ struct LuminaLogicTests {
         testStatusTitle()
         testTargetResolution()
         testLifecycleState()
+        testLifecycleCoordinatorRepeatedCycles()
+        testLifecycleCoordinatorReconciliation()
+        testLifecycleCoordinatorOverlapAndDuplicates()
         testDisplayParsing()
         testMalformedAndLargeDisplayPayloads()
         print("Lumina logic tests passed.")
@@ -46,6 +49,75 @@ struct LuminaLogicTests {
         expect(state.apply(.screenLocked) == .becameInactive, "Rapid lock should enter inactive state")
         expect(state.apply(.screenUnlocked) == .becameActive, "Rapid unlock should return active")
         expect(state.apply(.screenLocked) == .becameInactive, "Second rapid lock should enter inactive state")
+    }
+
+    private static func testLifecycleCoordinatorRepeatedCycles() {
+        var coordinator = DisplayLifecycleCoordinator()
+
+        for cycle in 1...10 {
+            let lock = coordinator.receive(.screenLocked, sessionScreenIsLocked: true)
+            expect(lock.action == .powerOff, "Cycle \(cycle) lock should request immediate power-off")
+            expect(lock.transition == .becameInactive, "Cycle \(cycle) lock should become inactive")
+
+            let unlock = coordinator.receive(.screenUnlocked, sessionScreenIsLocked: false)
+            expect(unlock.action == .powerOn, "Cycle \(cycle) unlock should request power-on")
+            expect(unlock.transition == .becameActive, "Cycle \(cycle) unlock should become active")
+        }
+    }
+
+    private static func testLifecycleCoordinatorReconciliation() {
+        var coordinator = DisplayLifecycleCoordinator()
+        let lock = coordinator.receive(.screenLocked, sessionScreenIsLocked: true)
+        expect(lock.action == .powerOff, "Initial lock should request power-off")
+
+        let staleUnlock = coordinator.receive(
+            .screenUnlocked,
+            sessionScreenIsLocked: true,
+            finalReconciliationAttempt: false
+        )
+        expect(staleUnlock.disposition == .delayed, "Stale unlock evidence should delay reconciliation")
+        expect(coordinator.state.isScreenLocked, "Delayed unlock must not mutate lifecycle state")
+
+        let reconciledUnlock = coordinator.receive(.screenUnlocked, sessionScreenIsLocked: false)
+        expect(reconciledUnlock.action == .powerOn, "Reconciled unlock should request power-on")
+        expect(!coordinator.state.isScreenLocked, "Reconciled unlock should clear the lock state")
+
+        let staleLock = coordinator.receive(
+            .screenLocked,
+            sessionScreenIsLocked: false,
+            finalReconciliationAttempt: false
+        )
+        expect(staleLock.disposition == .delayed, "Stale lock evidence should delay reconciliation")
+        expect(!coordinator.state.isScreenLocked, "Delayed lock must not mutate lifecycle state")
+
+        let reconciledLock = coordinator.receive(.screenLocked, sessionScreenIsLocked: true)
+        expect(reconciledLock.action == .powerOff, "Reconciled lock should request immediate power-off")
+
+        let unavailableSession = coordinator.receive(.screenUnlocked, sessionScreenIsLocked: nil)
+        expect(unavailableSession.action == .powerOn, "Unavailable session evidence should not veto a notification")
+
+        let staleDelayedNotification = coordinator.receive(
+            .screenLocked,
+            sessionScreenIsLocked: false,
+            finalReconciliationAttempt: true
+        )
+        expect(staleDelayedNotification.disposition == .ignored, "A persistent mismatch should be ignored as stale")
+        expect(!coordinator.state.isScreenLocked, "Ignored stale notification must not corrupt state")
+    }
+
+    private static func testLifecycleCoordinatorOverlapAndDuplicates() {
+        var coordinator = DisplayLifecycleCoordinator()
+        expect(coordinator.receive(.screenLocked, sessionScreenIsLocked: true).action == .powerOff, "Lock should power off")
+        expect(coordinator.receive(.screenLocked, sessionScreenIsLocked: true).action == .none, "Duplicate lock should not issue another transition command")
+        expect(coordinator.receive(.systemWillSleep).action == .none, "Sleep while locked should remain inactive")
+        expect(coordinator.receive(.systemDidWake).action == .none, "Wake while locked must not power on")
+        expect(coordinator.receive(.screenUnlocked, sessionScreenIsLocked: false).action == .powerOn, "Unlock after wake should power on")
+
+        expect(coordinator.receive(.systemWillSleep).action == .powerOff, "Sleep should power off")
+        expect(coordinator.receive(.screenLocked, sessionScreenIsLocked: true).action == .none, "Lock while asleep should not conflict")
+        expect(coordinator.receive(.screenUnlocked, sessionScreenIsLocked: false).action == .none, "Unlock while asleep must not power on")
+        expect(coordinator.receive(.systemDidWake).action == .powerOn, "Wake after unlock should power on")
+        expect(coordinator.receive(.systemDidWake).action == .none, "Duplicate wake should not issue another command")
     }
 
     private static func testDisplayParsing() {
