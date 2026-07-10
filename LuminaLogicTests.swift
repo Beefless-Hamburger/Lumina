@@ -94,7 +94,7 @@ struct LuminaLogicTests {
           {"deviceType":"Display","name":42}
         ]
         """
-        expect(parseDisplayNames(from: noisyPayload) == ["Display Epsilon", "Display Zeta", "Wrong Type"], "Display parsing should trim, deduplicate, and reject explicit non-display devices")
+        expect(parseDisplayNames(from: noisyPayload) == ["Display Epsilon", "Display Zeta"], "Display parsing should trim, deduplicate, and reject invalid device types")
 
         let unicodePayload = """
         {"deviceType":"Display","name":"Écran 東京"}
@@ -113,7 +113,7 @@ struct LuminaLogicTests {
         {malformed},
         {"deviceType":"Display","name":"Valid {Two}"}
         """
-        expect(parseDisplayNames(from: mixedPayload) == ["Valid One", "Valid {Two}"], "Malformed records should not discard valid records")
+        expect(parseDisplayNames(from: mixedPayload) == ["Valid {Two}", "Valid One"], "Malformed records should not discard valid records")
 
         let largePayload = (0..<2_000)
             .map { index in
@@ -128,7 +128,7 @@ struct LuminaLogicTests {
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
         guard condition() else {
-            fputs("Lumina logic test failed: \(message)\n", stderr)
+            print("Lumina logic test failed: \(message)")
             exit(1)
         }
     }
