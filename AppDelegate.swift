@@ -7,4 +7,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         monitor = DisplayMonitor()
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        monitor?.cleanup()
+        monitor = nil
+    }
 }
