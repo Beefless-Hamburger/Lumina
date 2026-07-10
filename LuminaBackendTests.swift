@@ -280,7 +280,8 @@ struct LuminaBackendTests {
         let offResult = await backend.powerOff(targets: ["", ""])
         expect(onResult == .noTargets, "empty power-on targets should be skipped")
         expect(offResult == .noTargets, "empty power-off targets should be skipped")
-        expect(await transport.events.isEmpty, "empty targets should not launch BetterDisplay or issue commands")
+        let events = await transport.events
+        expect(events.isEmpty, "empty targets should not launch BetterDisplay or issue commands")
     }
 
     private static func testLaunchFailure() async {
@@ -445,16 +446,9 @@ struct LuminaBackendTests {
         expect(cancellationResult.status == .cancelled, "process runner should report cancellation distinctly")
     }
 
-    private static func expect(_ condition: @autoclosure () async -> Bool, _ message: String) async {
-        guard await condition() else {
-            fputs("Lumina backend test failed: \(message)\n", stderr)
-            exit(1)
-        }
-    }
-
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
         guard condition() else {
-            fputs("Lumina backend test failed: \(message)\n", stderr)
+            print("Lumina backend test failed: \(message)")
             exit(1)
         }
     }
