@@ -6,7 +6,9 @@ struct LuminaLogicTests {
     static func main() {
         testStatusTitle()
         testTargetResolution()
+        testLifecycleState()
         testDisplayParsing()
+        testMalformedAndLargeDisplayPayloads()
         print("Lumina logic tests passed.")
     }
 
@@ -19,9 +21,31 @@ struct LuminaLogicTests {
 
     private static func testTargetResolution() {
         expect(resolvedTargets(targetAllDisplays: true, targetDisplay: "Display Alpha", availableDisplays: ["Display Alpha", "Display Beta"]) == ["Display Alpha", "Display Beta"], "All displays resolution")
+        expect(resolvedTargets(targetAllDisplays: true, targetDisplay: "", availableDisplays: ["Display Alpha", "", "Display Alpha"]) == ["Display Alpha"], "All displays resolution should remove empty and duplicate targets")
         expect(resolvedTargets(targetAllDisplays: false, targetDisplay: "Display Alpha", availableDisplays: ["Display Alpha", "Display Beta"]) == ["Display Alpha"], "Single target resolution")
         expect(resolvedTargets(targetAllDisplays: false, targetDisplay: "", availableDisplays: ["Display Alpha"]) == [], "Empty target resolution")
         expect(resolvedTargets(targetAllDisplays: false, targetDisplay: "Missing", availableDisplays: ["Display Alpha"]) == [], "Unavailable target resolution")
+    }
+
+    private static func testLifecycleState() {
+        var state = DisplayLifecycleState()
+        expect(!state.isInactive, "Lifecycle should start active")
+        expect(state.apply(.screenLocked) == .becameInactive, "Lock should enter inactive state")
+        expect(state.apply(.screenLocked) == .unchanged, "Duplicate lock should be ignored")
+        expect(state.apply(.systemWillSleep) == .unchanged, "Sleep while locked should remain inactive")
+        expect(state.apply(.systemDidWake) == .unchanged, "Wake while still locked should remain inactive")
+        expect(state.isInactive, "Wake must not override an outstanding lock")
+        expect(state.apply(.screenUnlocked) == .becameActive, "Unlock after wake should return active")
+        expect(state.apply(.screenUnlocked) == .unchanged, "Duplicate unlock should be ignored")
+
+        expect(state.apply(.systemWillSleep) == .becameInactive, "Sleep should enter inactive state")
+        expect(state.apply(.screenLocked) == .unchanged, "Lock while asleep should remain inactive")
+        expect(state.apply(.screenUnlocked) == .unchanged, "Unlock while asleep should remain inactive")
+        expect(state.apply(.systemDidWake) == .becameActive, "Wake after unlock should return active")
+
+        expect(state.apply(.screenLocked) == .becameInactive, "Rapid lock should enter inactive state")
+        expect(state.apply(.screenUnlocked) == .becameActive, "Rapid unlock should return active")
+        expect(state.apply(.screenLocked) == .becameInactive, "Second rapid lock should enter inactive state")
     }
 
     private static func testDisplayParsing() {
@@ -33,7 +57,7 @@ struct LuminaLogicTests {
         expect(parseDisplayNames(from: payload) == ["Display Alpha", "Display Beta"], "Line-delimited display parsing")
 
         let wrappedPayload = """
-        {
+        ,{
           "UUID" : "00000000-0000-0000-0000-000000000001",
           "deviceType" : "Display",
           "name" : "Display Gamma"
@@ -44,14 +68,19 @@ struct LuminaLogicTests {
         },{
           "deviceType" : "DisplayGroup",
           "name" : "Default Group"
-        }
+        },
         """
-        expect(parseDisplayNames(from: wrappedPayload) == ["Display Delta", "Display Gamma"], "Wrapped BetterDisplay payload parsing")
+        expect(parseDisplayNames(from: wrappedPayload) == ["Display Delta", "Display Gamma"], "Comma-delimited BetterDisplay payload parsing")
 
         let arrayPayload = """
         [{"name":"Zeta"},{"name":"Alpha"},{"name":"Default Group"}]
         """
         expect(parseDisplayNames(from: arrayPayload) == ["Alpha", "Zeta"], "Array display parsing")
+
+        let singlePayload = """
+        {"deviceType":"Display","name":"Studio Display"}
+        """
+        expect(parseDisplayNames(from: singlePayload) == ["Studio Display"], "Single-object display parsing")
 
         let noisyPayload = """
         [
@@ -59,10 +88,42 @@ struct LuminaLogicTests {
           {"deviceType":"Display","name":"Display Epsilon"},
           {"deviceType":"DisplayGroup","name":"Display Group"},
           {"deviceType":"Display","name":""},
-          {"name":"Display Zeta"}
+          {"deviceType":"Audio","name":"Audio Device"},
+          {"name":"Display Zeta"},
+          {"deviceType":42,"name":"Wrong Type"},
+          {"deviceType":"Display","name":42}
         ]
         """
-        expect(parseDisplayNames(from: noisyPayload) == ["Display Epsilon", "Display Zeta"], "Display parsing should trim, deduplicate, and filter groups")
+        expect(parseDisplayNames(from: noisyPayload) == ["Display Epsilon", "Display Zeta", "Wrong Type"], "Display parsing should trim, deduplicate, and reject explicit non-display devices")
+
+        let unicodePayload = """
+        {"deviceType":"Display","name":"Écran 東京"}
+        {"deviceType":"Display","name":"alpha"}
+        {"deviceType":"Display","name":"Alpha"}
+        {"deviceType":"Display","name":"default group"}
+        """
+        expect(parseDisplayNames(from: unicodePayload) == ["Alpha", "alpha", "Écran 東京"], "Unicode parsing and deterministic case-insensitive sorting")
+    }
+
+    private static func testMalformedAndLargeDisplayPayloads() {
+        let mixedPayload = """
+        not-json
+        {"deviceType":"Display","name":"Valid One"},
+        {"deviceType":"Display","name":17},
+        {malformed},
+        {"deviceType":"Display","name":"Valid {Two}"}
+        """
+        expect(parseDisplayNames(from: mixedPayload) == ["Valid One", "Valid {Two}"], "Malformed records should not discard valid records")
+
+        let largePayload = (0..<2_000)
+            .map { index in
+                "{\"deviceType\":\"Display\",\"name\":\"Display \(String(format: "%04d", index))\"}"
+            }
+            .joined(separator: "\n")
+        let largeNames = parseDisplayNames(from: largePayload)
+        expect(largeNames.count == 2_000, "Large payload should preserve every valid display")
+        expect(largeNames.first == "Display 0000", "Large payload should sort deterministically at the beginning")
+        expect(largeNames.last == "Display 1999", "Large payload should sort deterministically at the end")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
