@@ -14,23 +14,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test-and-build:
-    name: Test and build
+  validate-scripts:
+    name: Validate shell scripts
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          show-progress: false
 
       - name: Validate shell scripts
         run: bash -n build.sh test_logic.sh test_backend.sh
 
+  logic-tests:
+    name: Logic tests
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          show-progress: false
+
       - name: Run logic tests
         run: bash test_logic.sh
 
+  backend-tests:
+    name: Backend tests
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          show-progress: false
+
       - name: Run backend tests
         run: bash test_backend.sh
+
+  build:
+    name: Optimized app build
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          show-progress: false
 
       - name: Build app bundle
         run: BUILD_TARGET="$(uname -m)-apple-macosx13.0" bash build.sh
