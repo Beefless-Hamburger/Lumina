@@ -1,128 +1,230 @@
+<div align="center">
+
 # Lumina
 
-[![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-lightgrey.svg)](#requirements)
-[![Swift](https://img.shields.io/badge/Swift-orange.svg)](#building-from-source)
+**Reliable sleep and wake automation for stubborn external displays on macOS.**
+
+[![CI](https://github.com/Beefless-Hamburger/Lumina/actions/workflows/ci.yml/badge.svg)](https://github.com/Beefless-Hamburger/Lumina/actions/workflows/ci.yml)
+[![macOS 13+](https://img.shields.io/badge/macOS-13%2B-000000?logo=apple)](#requirements)
+[![Swift](https://img.shields.io/badge/Swift-5-F05138?logo=swift&logoColor=white)](#development)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Lumina is a macOS menu bar utility for external displays that ignore normal macOS sleep and wake behavior.
+Lumina is a focused macOS menu bar utility that uses the BetterDisplay CLI to power selected external displays down when your Mac locks or sleeps, then bring them back through a staged recovery sequence when it unlocks or wakes.
 
-It targets a specific hardware annoyance: the Mac locks or sleeps, but an external display keeps behaving as if it is still receiving a signal. The monitor may stay awake, flicker on slightly, keep scanning for input, or refuse to wake cleanly afterward. Lumina uses the BetterDisplay CLI to run a display power-cycle sequence at the moments that matter: lock, unlock, sleep, and wake.
+[Quick Start](#quick-start) · [Usage](#usage) · [Troubleshooting](#troubleshooting) · [Development](#development)
 
-## Purpose
+</div>
 
-Lumina is designed for setups where macOS display sleep is not enough. Some external displays, adapters, docks, hubs, or cables can leave a phantom or lingering signal that prevents the monitor from fully powering down. Lumina automates the recovery sequence that would otherwise require opening BetterDisplay, toggling display state manually, pressing monitor buttons, or unplugging cables.
+## Why Lumina Exists
 
-When the Mac locks or sleeps, Lumina can disconnect the selected display and send a DDC power-off command. When the Mac wakes or unlocks, it reconnects the display, sends a DDC power-on command, reinitializes the display, and restores backlight state.
+Some external monitors never fully settle when macOS sleeps. They may remain backlit, repeatedly scan for an input, briefly flicker awake, or fail to reconnect cleanly afterward. Docks, adapters, cables, and imperfect DDC implementations can make the behavior even less predictable.
 
-Lumina is not a general display manager. It is a focused automation layer around BetterDisplay for one job: make selected external displays power down and come back cleanly with the Mac.
+Lumina automates the sequence that would otherwise require opening BetterDisplay, toggling connection state, pressing monitor controls, or reconnecting hardware.
 
-## Built For
-
-- External displays that ignore normal macOS sleep/wake behavior.
-- Monitors that stay lit, show a black-but-awake screen, flicker on slightly, or keep scanning for input after macOS sleeps.
-- USB-C, HDMI, dock, hub, or adapter setups that leave a phantom signal active.
-- Displays that need a stronger wake sequence than macOS normally sends.
-- Menu bar workflows where display recovery should happen automatically in the background.
+It is intentionally narrow in scope. Lumina is not a general display manager and does not replace BetterDisplay. It provides reliable lifecycle automation for displays that need a stronger shutdown and recovery sequence than macOS sends on its own.
 
 ## Features
 
-- **Lock and Sleep Shutdown**: Sends disconnect and DDC power-off commands when the Mac locks or sleeps.
-- **Wake Recovery Sequence**: Reconnects the display, sends DDC power-on, reinitializes the display, and restores backlight state.
-- **Menu Bar Controls**: Runs without a Dock icon and exposes manual power, refresh, target-selection, and quit actions from the menu bar.
-- **Target Selection**: Supports one selected display or all detected displays.
-- **Independent Automation Toggles**: Enables auto-off on lock/sleep and auto-on on unlock/wake separately.
-- **Launch at Login**: Uses macOS ServiceManagement to register or unregister the app as a login item.
-- **Persistent Preferences**: Stores display target and automation settings in `UserDefaults`.
+- **Automatic shutdown:** Disconnects selected displays and sends a DDC power-off command when macOS locks or sleeps.
+- **Staged wake recovery:** Reconnects displays, powers them on through DDC, reinitializes them, restores hardware backlight state, and sends a final power-on command.
+- **Independent automation controls:** Enable or disable shutdown and wake automation separately.
+- **Flexible targeting:** Control one selected display or every display reported by BetterDisplay.
+- **Manual recovery controls:** Force power on or off directly from the menu bar.
+- **Automatic BetterDisplay launch:** Starts BetterDisplay in the background when a command requires it.
+- **Launch at login:** Registers Lumina as a macOS login item through ServiceManagement.
+- **Persistent settings:** Remembers display targets and automation preferences between launches.
+- **Local operation:** Contains no telemetry, analytics, networking, or remote service integration.
 
 ## Requirements
 
 - macOS 13.0 or later.
-- Apple Silicon by default for `build.sh`; other macOS targets can be supplied with `BUILD_TARGET`.
+- Apple Silicon for the default build target. Intel or alternate targets can be supplied with `BUILD_TARGET`.
+- Xcode Command Line Tools or another macOS Swift toolchain that provides `swiftc`.
 - [BetterDisplay](https://github.com/waydabber/BetterDisplay) installed at `/Applications/BetterDisplay.app`.
-- A display path supported by BetterDisplay's CLI and DDC controls.
+- A monitor connection that BetterDisplay can identify and control. DDC support depends on the display, dock, adapter, and cable path.
 
-## Building from Source
+## Quick Start
 
-Clone the repository and run:
+### 1. Clone and build
 
 ```bash
+git clone https://github.com/Beefless-Hamburger/Lumina.git
+cd Lumina
 bash build.sh
 ```
 
-The app bundle is created at:
+The optimized, ad-hoc-signed application bundle will be created at:
 
 ```text
 Build/Lumina.app
 ```
 
-The build script compiles the Swift sources directly with `swiftc`, creates the app bundle and `Info.plist`, copies the app icon, strips cloud-sync extended attributes that can break signing, and ad-hoc signs the bundle.
-
-To build for a different local target, override `BUILD_TARGET`:
+### 2. Launch Lumina
 
 ```bash
-BUILD_TARGET="$(uname -m)-apple-macosx13.0" bash build.sh
+open Build/Lumina.app
 ```
 
-## Testing
+Lumina runs as a menu bar utility and does not create a Dock icon. Look for the moon-and-stars icon in the macOS menu bar.
 
-Run the backend tests:
+### 3. Configure your display
 
-```bash
-bash test_backend.sh
-```
+1. Open the Lumina menu.
+2. Choose **Select Specific Display**, then select the monitor you want Lumina to manage.
+3. Alternatively, enable **Target All Displays**.
+4. Leave **Auto-off on Lock/Sleep** and **Auto-on on Unlock/Wake** enabled.
+5. Use **Force Power Off** and **Force Power On** once to confirm that your display path supports the sequence.
+6. Enable **Launch at Login** after confirming the configuration works.
 
-Run the logic tests:
+## Usage
 
-```bash
-bash test_logic.sh
-```
+The menu bar provides the following controls:
 
-## How It Works
+| Control | Purpose |
+| --- | --- |
+| **Force Power Off** | Immediately runs the shutdown sequence for the current target. |
+| **Force Power On** | Immediately runs the staged recovery sequence for the current target. |
+| **Target All Displays** | Applies commands to every supported display found by BetterDisplay. |
+| **Auto-off on Lock/Sleep** | Runs the shutdown sequence when the Mac locks or enters sleep. |
+| **Auto-on on Unlock/Wake** | Runs the recovery sequence after the Mac is both awake and unlocked. |
+| **Launch at Login** | Registers or removes Lumina as a macOS login item. |
+| **Select Specific Display** | Selects one BetterDisplay display identifier as the target. |
+| **Refresh Displays** | Reloads the display list from BetterDisplay. |
 
-Lumina observes macOS lock, unlock, sleep, and wake events. The app treats those events as triggers for a serialized BetterDisplay command sequence.
+Lumina tracks lock and sleep state independently. A wake notification will not power a display on while the Mac remains locked, and an unlock notification will not override an outstanding sleep state.
 
-On lock or sleep:
+## Power Sequences
+
+### Lock or sleep
+
+For each selected display, Lumina runs:
 
 ```text
 connected=off
 ddc powerMode=4
 ```
 
-On unlock or wake:
+### Unlock or wake
+
+For each display that reconnects successfully, Lumina runs:
 
 ```text
 connected=on
 ddc powerMode=1
+wait 2 seconds
 reinitialize
+wait 2 seconds
 hardwareBacklight=on
 ddc powerMode=1
 ```
 
-The wake sequence is intentionally staged. Some displays need the reconnect, power-on, reinitialize, and backlight recovery commands to arrive separately before they settle into a usable state.
+The delays are intentional. Some monitors need time to re-establish their connection before accepting reinitialization and backlight commands.
 
-## Architecture
+## Reliability Design
 
-- `DisplayMonitor.swift`: menu bar UI, settings, lifecycle observers, target resolution, and automation triggers.
-- `BetterDisplayService.swift`: serialized display power-on and power-off sequences.
-- `SystemBetterDisplayTransport.swift`: BetterDisplay launch detection and direct `Process` execution.
-- `BetterDisplayOutputParser.swift`: parsing and filtering BetterDisplay display identifiers.
-- `DisplayLogic.swift`: pure target/status helpers used by tests.
+Display lifecycle notifications can arrive more than once, overlap, or occur out of order. BetterDisplay commands can also stall or fail independently for different displays. Lumina is designed around those conditions:
 
-The app invokes BetterDisplay with `Process.arguments` rather than shell interpolation. Display names remain single argument values, which avoids shell parsing behavior.
+- Lock and sleep are maintained as separate state instead of one shared flag.
+- Stale power operations are cancelled when lifecycle state or selected targets change.
+- BetterDisplay commands are serialized while cancellation can still reach the active process.
+- Child processes have bounded output capture, timeouts, and termination escalation.
+- A failure on one display does not automatically prevent unaffected displays from continuing.
+- The wake sequence skips later stages for a display that failed its initial reconnect.
+- Display identifiers are passed as direct process arguments rather than interpolated into shell commands.
 
-## Privacy And Local Data
+## Troubleshooting
 
-Lumina is local-only. It does not include networking code, analytics, telemetry, or remote services.
+### No displays appear
 
-The app stores local preferences with `UserDefaults`, including the selected display name and automation toggles. Runtime logs mark display labels and BetterDisplay diagnostics as private.
+- Confirm BetterDisplay is installed in `/Applications`.
+- Open BetterDisplay once and verify that it can see the monitor.
+- Choose **Refresh Displays** from Lumina.
+- Confirm the display is not represented only as a BetterDisplay group or another non-display record.
+
+### The monitor does not power off
+
+- Test **Force Power Off** before relying on automatic lock or sleep behavior.
+- Verify that BetterDisplay can disconnect the display manually.
+- Check whether DDC commands work through the current cable, adapter, dock, or hub.
+- Try selecting the display individually instead of using **Target All Displays**.
+
+### The monitor does not wake cleanly
+
+- Run **Force Power On** and allow the entire staged sequence to complete.
+- Confirm that BetterDisplay can reconnect and reinitialize the display manually.
+- Test a direct connection if the display is currently routed through a dock or adapter.
+- Some displays ignore hardware backlight or DDC power commands even when connection toggling works.
+
+### Launch at Login does not remain enabled
+
+Open **System Settings → General → Login Items & Extensions** and confirm that Lumina is allowed to run at login. The app should be launched from a stable location before registering it as a login item.
+
+## Development
+
+Lumina is built directly with `swiftc`; it does not require an Xcode project.
+
+### Build
+
+```bash
+bash build.sh
+```
+
+The build script:
+
+- Compiles with complete Swift concurrency diagnostics.
+- Creates the application bundle and `Info.plist` in a temporary staging directory.
+- Copies the app icon when available.
+- Removes extended attributes that can interfere with signing.
+- Ad-hoc signs and verifies the staged bundle.
+- Replaces `Build/Lumina.app` only after the new build succeeds.
+
+To build for the current machine architecture:
+
+```bash
+BUILD_TARGET="$(uname -m)-apple-macosx13.0" bash build.sh
+```
+
+### Test
+
+```bash
+bash test_logic.sh
+bash test_backend.sh
+```
+
+The logic suite covers lifecycle transitions, target resolution, and status behavior. The backend suite covers process execution, cancellation, timeouts, output limits, BetterDisplay launch behavior, power sequencing, partial failures, stale-operation suppression, parser behavior, and heartbeat lifecycle management.
+
+GitHub Actions validates the shell scripts, runs both test suites, creates an optimized app build, and verifies the final code signature on every pull request and every push to `main`.
+
+### Project Structure
+
+| File | Responsibility |
+| --- | --- |
+| `DisplayMonitor.swift` | Menu bar interface, preferences, lifecycle observers, target resolution, and automation coordination. |
+| `DisplayLogic.swift` | Pure lifecycle, target, and status logic used by the app and tests. |
+| `BetterDisplayService.swift` | Serialized power-off and staged power-on sequences. |
+| `SystemBetterDisplayTransport.swift` | BetterDisplay discovery, background launch, command dispatch, and result mapping. |
+| `AsyncProcessRunner.swift` | Asynchronous process execution with cancellation, timeout, and bounded output handling. |
+| `BetterDisplayOutputParser.swift` | Defensive parsing and filtering of BetterDisplay display identifiers. |
+| `ShutdownHeartbeatController.swift` | Repeats shutdown enforcement while the system remains inactive. |
+| `LuminaLogicTests.swift` | Deterministic tests for pure application logic. |
+| `LuminaBackendTests.swift` | Deterministic tests for transport, sequencing, parser, process, and heartbeat behavior. |
+
+## Privacy
+
+Lumina operates entirely on the local Mac. It contains no networking code, telemetry, analytics, advertising, or remote service integration.
+
+Preferences are stored locally with `UserDefaults`. Runtime logging uses macOS unified logging and marks display labels and BetterDisplay diagnostics as private where appropriate.
 
 ## Limitations
 
-- Lumina depends on BetterDisplay and does not replace it.
-- DDC behavior varies by monitor, adapter, dock, and cable.
-- Some displays may not support every command in the wake or shutdown sequence.
-- The app is currently distributed as source and a local build script, not as a notarized release package.
+- BetterDisplay is required and must remain installed for Lumina to function.
+- DDC support varies significantly across monitors and connection paths.
+- Some displays support connection toggling but ignore power, reinitialization, or hardware backlight commands.
+- Lumina is currently distributed as source and a local build script rather than a notarized release package.
+- Real hardware behavior cannot be fully represented by automated tests.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Lumina is available under the [MIT License](LICENSE).
+
+BetterDisplay is a separate project maintained by its own developers. Lumina is not affiliated with or endorsed by BetterDisplay.
