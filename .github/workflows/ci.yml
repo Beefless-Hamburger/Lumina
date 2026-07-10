@@ -26,7 +26,7 @@ jobs:
           show-progress: false
 
       - name: Validate shell scripts
-        run: bash -n build.sh test_logic.sh test_backend.sh
+        run: bash -n build.sh package_dmg.sh test_logic.sh test_backend.sh
 
   logic-tests:
     name: Logic tests
