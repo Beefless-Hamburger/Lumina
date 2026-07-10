@@ -471,13 +471,15 @@ final class DisplayMonitor: NSObject {
     }
 
     private func executePower(direction: PowerDirection) {
-        let generation = beginPowerGeneration(direction: direction)
+        invalidatePowerOperation()
         let targets = getTargets()
         guard !targets.isEmpty else {
             logger.info("Skipping power command because no display target is currently resolved.")
             return
         }
 
+        powerDirection = direction
+        let generation = powerGeneration
         let backend = displayService
         powerTask = Task { [weak self] in
             let result: DisplayOperationResult
@@ -496,14 +498,6 @@ final class DisplayMonitor: NSObject {
                 self.powerDirection = nil
             }
         }
-    }
-
-    private func beginPowerGeneration(direction: PowerDirection) -> Int {
-        powerTask?.cancel()
-        powerTask = nil
-        powerDirection = direction
-        powerGeneration += 1
-        return powerGeneration
     }
 
     private func invalidatePowerOperation(if direction: PowerDirection? = nil) {
