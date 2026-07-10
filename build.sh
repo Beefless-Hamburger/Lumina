@@ -5,8 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 APP_NAME="Lumina"
-BUILD_DIR="Build"
+BUILD_DIR="${BUILD_DIR:-Build}"
 BUILD_TARGET="${BUILD_TARGET:-arm64-apple-macosx13.0}"
+APP_VERSION="${APP_VERSION:-1.0.0}"
+APP_BUILD="${APP_BUILD:-1}"
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/LuminaBuild.XXXXXX")"
 STAGED_APP="$STAGING_DIR/$APP_NAME.app"
 FINAL_APP="$BUILD_DIR/$APP_NAME.app"
@@ -54,7 +56,7 @@ SWIFT_FLAGS=(
     -strict-concurrency=complete
 )
 
-echo "Compiling for $BUILD_TARGET..."
+echo "Compiling Lumina $APP_VERSION for $BUILD_TARGET..."
 swiftc "${SOURCES[@]}" \
     -o "$STAGED_APP/Contents/MacOS/$APP_NAME" \
     -target "$BUILD_TARGET" \
@@ -83,7 +85,9 @@ cat > "$STAGED_APP/Contents/Info.plist" <<EOF
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>$APP_VERSION</string>
+    <key>CFBundleVersion</key>
+    <string>$APP_BUILD</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
