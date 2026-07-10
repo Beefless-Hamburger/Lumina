@@ -10,19 +10,26 @@ func parseDisplayNames(from output: String) -> [String] {
         return names
     }
 
-    var dictionaries = extractJSONObjectPayloads(from: trimmedOutput).compactMap(parseDictionary)
+    let scan = scanJSONObjectPayloads(in: trimmedOutput)
+    var dictionaries = scan.objects.compactMap(parseDictionary)
 
-    // A malformed, unbalanced record should not prevent later line-delimited
-    // records from being recovered when each valid record occupies one line.
-    dictionaries.append(contentsOf: trimmedOutput
-        .split(whereSeparator: \.isNewline)
-        .compactMap { line -> [String: Any]? in
-            let cleanedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                .trimmingCharacters(in: CharacterSet(charactersIn: ","))
-            return parseDictionary(cleanedLine[...])
-        })
+    // Recover valid one-line records after an unterminated malformed object.
+    if scan.hasUnterminatedObject {
+        dictionaries.append(contentsOf: trimmedOutput
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line -> [String: Any]? in
+                let cleanedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: ","))
+                return parseDictionary(cleanedLine[...])
+            })
+    }
 
     return extractDisplayNames(from: dictionaries)
+}
+
+private struct JSONObjectScan {
+    let objects: [Substring]
+    let hasUnterminatedObject: Bool
 }
 
 private func parseDisplayNames(fromSinglePayload payload: String) -> [String]? {
@@ -49,7 +56,7 @@ private func parseDictionary(_ payload: Substring) -> [String: Any]? {
     return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
 }
 
-private func extractJSONObjectPayloads(from payload: String) -> [Substring] {
+private func scanJSONObjectPayloads(in payload: String) -> JSONObjectScan {
     var objects: [Substring] = []
     var objectStart: String.Index?
     var depth = 0
@@ -87,35 +94,27 @@ private func extractJSONObjectPayloads(from payload: String) -> [Substring] {
             depth += 1
         case "}":
             depth -= 1
-            if depth == 0, let objectStart {
-                objects.append(payload[objectStart...index])
-                selfReset(&objectStart, depth: &depth, isInsideString: &isInsideString, isEscaping: &isEscaping)
+            if depth == 0, let start = objectStart {
+                objects.append(payload[start...index])
+                objectStart = nil
+                isInsideString = false
+                isEscaping = false
             }
         default:
             break
         }
     }
 
-    return objects
-}
-
-private func selfReset(
-    _ objectStart: inout String.Index?,
-    depth: inout Int,
-    isInsideString: inout Bool,
-    isEscaping: inout Bool
-) {
-    objectStart = nil
-    depth = 0
-    isInsideString = false
-    isEscaping = false
+    return JSONObjectScan(objects: objects, hasUnterminatedObject: objectStart != nil)
 }
 
 private func extractDisplayNames(from dictionaries: [[String: Any]]) -> [String] {
     let candidates = dictionaries.compactMap { dictionary -> String? in
-        if let deviceType = dictionary["deviceType"] as? String,
-           deviceType.localizedCaseInsensitiveCompare("Display") != .orderedSame {
-            return nil
+        if let rawDeviceType = dictionary["deviceType"] {
+            guard let deviceType = rawDeviceType as? String,
+                  deviceType.localizedCaseInsensitiveCompare("Display") == .orderedSame else {
+                return nil
+            }
         }
 
         guard let rawName = dictionary["name"] as? String else {
