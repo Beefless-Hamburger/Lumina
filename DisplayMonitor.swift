@@ -12,6 +12,14 @@ final class DisplayMonitor: NSObject {
     }
 
     var availableDisplays: [String] = []
+    private var availableDisplayTargets: [DisplayTarget] = []
+    private var targetDisplayIdentifier: String = "" {
+        didSet {
+            if oldValue != targetDisplayIdentifier {
+                UserDefaults.standard.set(targetDisplayIdentifier, forKey: "TargetDisplayIdentifier")
+            }
+        }
+    }
 
     // Settings
     var targetDisplay: String = "" {
@@ -42,10 +50,18 @@ final class DisplayMonitor: NSObject {
             }
         }
     }
+    var restoreHDRBrightnessAfterWake: Bool = false {
+        didSet {
+            if oldValue != restoreHDRBrightnessAfterWake {
+                saveRestoreHDRBrightnessPreference(restoreHDRBrightnessAfterWake, to: .standard)
+            }
+        }
+    }
 
     private let logger = Logger(subsystem: "io.github.lumina-app.Lumina", category: "DisplayMonitor")
     private let displayService: any DisplayBackend
     private let heartbeatController: ShutdownHeartbeatController
+    private let sessionLockStateProvider: @MainActor () -> Bool?
     private let appBundleID = "pro.betterdisplay.BetterDisplay"
     private var statusItem: NSStatusItem?
     private var refreshTask: Task<Void, Never>?
@@ -53,22 +69,28 @@ final class DisplayMonitor: NSObject {
     private var refreshGeneration = 0
     private var powerGeneration = 0
     private var powerDirection: PowerDirection?
+    private var screenReconciliationTask: Task<Void, Never>?
+    private var screenNotificationGeneration = 0
+    private let screenReconciliationAttempts = 5
+    private let screenReconciliationDelayNanoseconds: UInt64 = 100_000_000
 
     // State & Resource Management
-    private var lifecycleState = DisplayLifecycleState()
+    private var lifecycleCoordinator = DisplayLifecycleCoordinator()
     private var observers: [NSObjectProtocol] = []
 
     private var isLockedOrAsleep: Bool {
-        lifecycleState.isInactive
+        lifecycleCoordinator.state.isInactive
     }
 
     init(
         displayBackend: any DisplayBackend = BetterDisplayService(),
         heartbeatScheduler: any HeartbeatScheduling = FoundationHeartbeatScheduler(),
+        sessionLockStateProvider: @escaping @MainActor () -> Bool? = DisplayMonitor.systemSessionScreenIsLocked,
         createStatusItem: Bool = true
     ) {
         self.displayService = displayBackend
         heartbeatController = ShutdownHeartbeatController(scheduler: heartbeatScheduler)
+        self.sessionLockStateProvider = sessionLockStateProvider
         super.init()
         loadSettings()
 
@@ -84,9 +106,10 @@ final class DisplayMonitor: NSObject {
         updateMenu()
     }
 
-    deinit {
+    isolated deinit {
         refreshTask?.cancel()
         powerTask?.cancel()
+        screenReconciliationTask?.cancel()
         for observer in observers {
             DistributedNotificationCenter.default().removeObserver(observer)
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
@@ -98,6 +121,9 @@ final class DisplayMonitor: NSObject {
         refreshTask = nil
         refreshGeneration += 1
         invalidatePowerOperation()
+        screenReconciliationTask?.cancel()
+        screenReconciliationTask = nil
+        screenNotificationGeneration += 1
         stopHeartbeatTimer()
 
         for observer in observers {
@@ -151,6 +177,11 @@ final class DisplayMonitor: NSObject {
         autoOnItem.state = autoOnOnUnlock ? .on : .off
         menu.addItem(autoOnItem)
 
+        let brightnessItem = NSMenuItem(title: "Restore HDR Brightness After Wake", action: #selector(toggleHDRBrightnessRecovery), keyEquivalent: "")
+        brightnessItem.target = self
+        brightnessItem.state = restoreHDRBrightnessAfterWake ? .on : .off
+        menu.addItem(brightnessItem)
+
         let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         loginItem.target = self
         loginItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
@@ -166,7 +197,10 @@ final class DisplayMonitor: NSObject {
             for name in availableDisplays {
                 let item = NSMenuItem(title: name, action: #selector(selectDisplay(_:)), keyEquivalent: "")
                 item.target = self
-                item.state = (!targetAllDisplays && name == targetDisplay) ? .on : .off
+                if let target = availableDisplayTargets.first(where: { $0.selectionLabel == name }) {
+                    item.representedObject = target.identifier
+                    item.state = (!targetAllDisplays && target.identifier == targetDisplayIdentifier) ? .on : .off
+                }
                 item.isEnabled = !targetAllDisplays
                 displayMenu.addItem(item)
             }
@@ -219,6 +253,12 @@ final class DisplayMonitor: NSObject {
         if !autoOnOnUnlock {
             invalidatePowerOperation(if: .on)
         }
+        updateMenu()
+    }
+
+    @objc func toggleHDRBrightnessRecovery() {
+        restoreHDRBrightnessAfterWake.toggle()
+        logger.info("HDR brightness recovery setting changed; enabled=\(self.restoreHDRBrightnessAfterWake, privacy: .public).")
         updateMenu()
     }
 
@@ -281,6 +321,7 @@ final class DisplayMonitor: NSObject {
 
     @objc func selectDisplay(_ sender: NSMenuItem) {
         targetDisplay = sender.title
+        targetDisplayIdentifier = sender.representedObject as? String ?? ""
         targetAllDisplays = false
         targetSelectionDidChange()
         logger.info("Selected display \(sender.title, privacy: .private).")
@@ -292,21 +333,33 @@ final class DisplayMonitor: NSObject {
         let generation = beginRefreshGeneration()
         let backend = displayService
         refreshTask = Task { [weak self] in
-            let names = await backend.refreshDisplayNames()
+            let targets = await backend.refreshDisplayTargets()
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 guard let self, self.isCurrentRefresh(generation) else { return }
-                self.applyDisplayRefresh(names)
+                self.applyDisplayRefresh(targets)
             }
         }
     }
 
-    private func applyDisplayRefresh(_ names: [String]) {
+    private func applyDisplayRefresh(_ targets: [DisplayTarget]) {
         let previousTargets = getTargets()
-        availableDisplays = names
+        availableDisplayTargets = targets
+        availableDisplays = targets.map(\.selectionLabel)
+
+        if targetDisplayIdentifier.isEmpty, !targetDisplay.isEmpty {
+            let legacyMatches = targets.filter { $0.name == targetDisplay || $0.selectionLabel == targetDisplay }
+            if legacyMatches.count == 1, let match = legacyMatches.first {
+                targetDisplayIdentifier = match.identifier
+                targetDisplay = match.selectionLabel
+            }
+        } else if let selected = targets.first(where: { $0.identifier == targetDisplayIdentifier }) {
+            targetDisplay = selected.selectionLabel
+        }
         let refreshedTargets = getTargets()
 
-        if !targetAllDisplays, !targetDisplay.isEmpty, !availableDisplays.contains(targetDisplay) {
+        if !targetAllDisplays, !targetDisplayIdentifier.isEmpty,
+           !availableDisplayTargets.contains(where: { $0.identifier == targetDisplayIdentifier }) {
             logger.warning("Selected display \(self.targetDisplay, privacy: .private) is unavailable after refresh.")
         }
 
@@ -329,9 +382,11 @@ final class DisplayMonitor: NSObject {
 
     private func loadSettings() {
         targetDisplay = UserDefaults.standard.string(forKey: "TargetDisplay") ?? ""
+        targetDisplayIdentifier = UserDefaults.standard.string(forKey: "TargetDisplayIdentifier") ?? ""
         targetAllDisplays = UserDefaults.standard.bool(forKey: "TargetAllDisplays")
         autoOffOnLock = UserDefaults.standard.object(forKey: "AutoOffOnLock") as? Bool ?? true
         autoOnOnUnlock = UserDefaults.standard.object(forKey: "AutoOnOnUnlock") as? Bool ?? true
+        restoreHDRBrightnessAfterWake = loadRestoreHDRBrightnessPreference(from: .standard)
     }
 
     private func beginRefreshGeneration() -> Int {
@@ -349,14 +404,12 @@ final class DisplayMonitor: NSObject {
 
         observers.append(dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard self?.shouldAcceptScreenLockNotification() ?? false else { return }
-                self?.handleLifecycleEvent(.screenLocked)
+                self?.receiveScreenNotification(.screenLocked)
             }
         })
         observers.append(dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard self?.shouldAcceptScreenUnlockNotification() ?? false else { return }
-                self?.handleLifecycleEvent(.screenUnlocked)
+                self?.receiveScreenNotification(.screenUnlocked)
             }
         })
         observers.append(wc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -371,35 +424,55 @@ final class DisplayMonitor: NSObject {
         })
     }
 
-    private func shouldAcceptScreenLockNotification() -> Bool {
-        guard let isLocked = currentSessionScreenIsLocked() else {
-            logger.debug("Accepting screen lock notification because session lock state is unavailable.")
-            return true
+    private func receiveScreenNotification(_ event: DisplayLifecycleEvent) {
+        screenReconciliationTask?.cancel()
+        screenNotificationGeneration += 1
+        let generation = screenNotificationGeneration
+        logger.debug("Received \(self.eventLabel(event), privacy: .public) notification.")
+
+        screenReconciliationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            for attempt in 1...screenReconciliationAttempts {
+                guard !Task.isCancelled, generation == screenNotificationGeneration else { return }
+                let sessionLocked = currentSessionScreenIsLocked()
+                let isFinalAttempt = attempt == screenReconciliationAttempts
+                let outcome = lifecycleCoordinator.receive(
+                    event,
+                    sessionScreenIsLocked: sessionLocked,
+                    finalReconciliationAttempt: isFinalAttempt
+                )
+                logScreenNotificationDecision(
+                    event: event,
+                    sessionLocked: sessionLocked,
+                    attempt: attempt,
+                    outcome: outcome
+                )
+
+                if outcome.disposition != .delayed {
+                    if outcome.disposition == .accepted {
+                        applyLifecycleOutcome(outcome, event: event)
+                    }
+                    if generation == screenNotificationGeneration {
+                        screenReconciliationTask = nil
+                    }
+                    return
+                }
+
+                do {
+                    try await Task.sleep(nanoseconds: screenReconciliationDelayNanoseconds)
+                } catch {
+                    return
+                }
+            }
         }
-
-        guard isLocked else {
-            logger.warning("Ignoring screen lock notification because the current session is not locked.")
-            return false
-        }
-
-        return true
-    }
-
-    private func shouldAcceptScreenUnlockNotification() -> Bool {
-        guard let isLocked = currentSessionScreenIsLocked() else {
-            logger.debug("Accepting screen unlock notification because session lock state is unavailable.")
-            return true
-        }
-
-        guard !isLocked else {
-            logger.warning("Ignoring screen unlock notification because the current session is still locked.")
-            return false
-        }
-
-        return true
     }
 
     private func currentSessionScreenIsLocked() -> Bool? {
+        sessionLockStateProvider()
+    }
+
+    private static func systemSessionScreenIsLocked() -> Bool? {
         guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else {
             return nil
         }
@@ -408,7 +481,13 @@ final class DisplayMonitor: NSObject {
     }
 
     func handleLifecycleEvent(_ event: DisplayLifecycleEvent) {
-        let transition = lifecycleState.apply(event)
+        let outcome = lifecycleCoordinator.receive(event)
+        applyLifecycleOutcome(outcome, event: event)
+    }
+
+    private func applyLifecycleOutcome(_ outcome: DisplayLifecycleOutcome, event: DisplayLifecycleEvent) {
+        guard let transition = outcome.transition else { return }
+        logger.debug("Applied \(self.eventLabel(event), privacy: .public): transition=\(self.transitionLabel(transition), privacy: .public), beforeLocked=\(outcome.stateBefore.isScreenLocked, privacy: .public), beforeAsleep=\(outcome.stateBefore.isSystemAsleep, privacy: .public), afterLocked=\(outcome.stateAfter.isScreenLocked, privacy: .public), afterAsleep=\(outcome.stateAfter.isSystemAsleep, privacy: .public).")
 
         switch transition {
         case .becameInactive:
@@ -425,7 +504,7 @@ final class DisplayMonitor: NSObject {
             logger.debug("System fully returned from lock and sleep.")
             stopHeartbeatTimer()
             if autoOnOnUnlock {
-                executePowerOn()
+                executePowerOn(restoreHDRBrightness: true)
             }
 
         case .unchanged:
@@ -442,35 +521,79 @@ final class DisplayMonitor: NSObject {
         }
     }
 
+    private func logScreenNotificationDecision(
+        event: DisplayLifecycleEvent,
+        sessionLocked: Bool?,
+        attempt: Int,
+        outcome: DisplayLifecycleOutcome
+    ) {
+        let sessionLabel = sessionLocked.map(String.init) ?? "unavailable"
+        let disposition: String
+        switch outcome.disposition {
+        case .accepted: disposition = "accepted"
+        case .delayed: disposition = "delayed"
+        case .ignored: disposition = "ignored"
+        }
+        logger.debug("Screen event=\(self.eventLabel(event), privacy: .public), sessionLocked=\(sessionLabel, privacy: .public), attempt=\(attempt, privacy: .public), decision=\(disposition, privacy: .public), stateLocked=\(self.lifecycleCoordinator.state.isScreenLocked, privacy: .public), stateAsleep=\(self.lifecycleCoordinator.state.isSystemAsleep, privacy: .public).")
+    }
+
+    private func eventLabel(_ event: DisplayLifecycleEvent) -> String {
+        switch event {
+        case .screenLocked: return "screenLocked"
+        case .screenUnlocked: return "screenUnlocked"
+        case .systemWillSleep: return "systemWillSleep"
+        case .systemDidWake: return "systemDidWake"
+        }
+    }
+
+    private func transitionLabel(_ transition: DisplayLifecycleTransition) -> String {
+        switch transition {
+        case .becameInactive: return "becameInactive"
+        case .becameActive: return "becameActive"
+        case .unchanged: return "unchanged"
+        }
+    }
+
     private func startHeartbeatTimer() {
         guard autoOffOnLock, isLockedOrAsleep else {
             logger.debug("Not starting shutdown heartbeat because shutdown automation is inactive.")
             return
         }
 
+        let wasRunning = heartbeatController.isRunning
         heartbeatController.start { [weak self] in
             guard let self, self.isLockedOrAsleep, self.autoOffOnLock else { return }
             self.executePowerOff()
         }
+        logger.debug("Shutdown heartbeat start requested; wasRunning=\(wasRunning, privacy: .public), isRunning=\(self.heartbeatController.isRunning, privacy: .public).")
     }
 
     private func stopHeartbeatTimer() {
+        let wasRunning = heartbeatController.isRunning
         heartbeatController.stop()
+        logger.debug("Shutdown heartbeat stopped; wasRunning=\(wasRunning, privacy: .public).")
     }
 
     private func getTargets() -> [String] {
-        resolvedTargets(targetAllDisplays: targetAllDisplays, targetDisplay: targetDisplay, availableDisplays: availableDisplays)
+        if targetAllDisplays {
+            return availableDisplayTargets.map(\.identifier)
+        }
+        guard availableDisplayTargets.contains(where: { $0.identifier == targetDisplayIdentifier }) else {
+            return []
+        }
+        return [targetDisplayIdentifier]
     }
 
     func executePowerOff() {
         executePower(direction: .off)
     }
 
-    func executePowerOn() {
-        executePower(direction: .on)
+    func executePowerOn(restoreHDRBrightness: Bool = false) {
+        executePower(direction: .on, restoreHDRBrightness: restoreHDRBrightness)
     }
 
-    private func executePower(direction: PowerDirection) {
+    private func executePower(direction: PowerDirection, restoreHDRBrightness: Bool = false) {
+        let cancelledExistingTask = powerTask != nil
         invalidatePowerOperation()
         let targets = getTargets()
         guard !targets.isEmpty else {
@@ -480,6 +603,9 @@ final class DisplayMonitor: NSObject {
 
         powerDirection = direction
         let generation = powerGeneration
+        let operation = direction == .on ? "power-on" : "power-off"
+        let shouldRestoreHDRBrightness = restoreHDRBrightness && restoreHDRBrightnessAfterWake
+        logger.debug("Requesting \(operation, privacy: .public), generation=\(generation, privacy: .public), cancelledExistingTask=\(cancelledExistingTask, privacy: .public), targetCount=\(targets.count, privacy: .public).")
         let backend = displayService
         powerTask = Task { [weak self] in
             let result: DisplayOperationResult
@@ -487,7 +613,10 @@ final class DisplayMonitor: NSObject {
             case .off:
                 result = await backend.powerOff(targets: targets)
             case .on:
-                result = await backend.powerOn(targets: targets)
+                result = await backend.powerOn(
+                    targets: targets,
+                    restoreHDRBrightness: shouldRestoreHDRBrightness
+                )
             }
 
             guard !Task.isCancelled else { return }

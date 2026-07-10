@@ -208,6 +208,12 @@ struct LuminaBackendTests {
     static func main() async {
         await testRefreshParsing()
         await testPowerOnSequence()
+        await testHDRBrightnessRecovery()
+        await testHDRBrightnessPartialFailure()
+        await testHDRBrightnessQualificationStates()
+        await testHDRBrightnessFailureRecovery()
+        await testHDRBrightnessCancellation()
+        await testRepeatedHDRBrightnessCycles()
         await testPowerOffSequence()
         await testEmptyTargets()
         await testLaunchFailure()
@@ -223,14 +229,14 @@ struct LuminaBackendTests {
     private static func testRefreshParsing() async {
         let transport = MockDisplayTransport()
         await transport.setRefreshOutput("""
-        {"name":"Display Beta"}
+        {"UUID":"uuid-beta","name":"Display Beta"}
         {"name":"Default Group"}
-        {"name":"Display Alpha"}
+        {"UUID":"uuid-alpha","name":"Display Alpha"}
         """)
 
         let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
-        let names = await backend.refreshDisplayNames()
-        expect(names == ["Display Alpha", "Display Beta"], "refresh parsing and sorting")
+        let targets = await backend.refreshDisplayTargets()
+        expect(targets.map(\.name) == ["Display Alpha", "Display Beta"], "refresh parsing and sorting")
 
         let events = await transport.events
         expect(events.count == 2, "refresh should launch BetterDisplay and request identifiers")
@@ -248,11 +254,121 @@ struct LuminaBackendTests {
         let events = await transport.events
         expect(events.count == 11, "power-on should issue all launch and display commands")
         expect(events[0] == .ensure("power on"), "power-on should ensure BetterDisplay is running")
-        expect(events[1] == .run(["set", "-name=Display Alpha", "-connected=on"], false), "power-on should connect the first display")
-        expect(events[2] == .run(["set", "-name=Display Alpha", "-ddc", "-vcp=powerMode", "-value=1"], false), "power-on should send DDC on for the first display")
-        expect(events[3] == .run(["set", "-name=Display Beta", "-connected=on"], false), "power-on should connect the second display")
-        expect(events[5] == .run(["perform", "-name=Display Alpha", "-reinitialize"], false), "power-on should reinitialize the first display")
-        expect(events[10] == .run(["set", "-name=Display Beta", "-ddc", "-vcp=powerMode", "-value=1"], false), "power-on should finish DDC on for the second display")
+        expect(events[1] == .run(["set", "-UUID=Display Alpha", "-connected=on"], false), "power-on should connect the first display")
+        expect(events[2] == .run(["set", "-UUID=Display Alpha", "-ddc", "-vcp=powerMode", "-value=1"], false), "power-on should send DDC on for the first display")
+        expect(events[3] == .run(["set", "-UUID=Display Beta", "-connected=on"], false), "power-on should connect the second display")
+        expect(events[5] == .run(["perform", "-UUID=Display Alpha", "-reinitialize"], false), "power-on should reinitialize the first display")
+        expect(events[10] == .run(["set", "-UUID=Display Beta", "-ddc", "-vcp=powerMode", "-value=1"], false), "power-on should finish DDC on for the second display")
+    }
+
+    private static func testHDRBrightnessRecovery() async {
+        let transport = MockDisplayTransport()
+        for target in ["Display Alpha", "Display Beta"] {
+            await transport.setResult(
+                successfulExecution(output: "on\n"),
+                for: ["get", "-UUID=\(target)", "-hdr", "-value"]
+            )
+        }
+        let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
+
+        let result = await backend.powerOn(
+            targets: ["Display Alpha", "Display Beta"],
+            restoreHDRBrightness: true
+        )
+
+        expect(result == DisplayOperationResult(status: .succeeded, attemptedCommandCount: 12, failedCommandCount: 0), "enabled HDR recovery should add one brightness command per qualified display")
+        let events = await transport.events
+        for target in ["Display Alpha", "Display Beta"] {
+            let hdr = MockDisplayTransport.Event.run(["get", "-UUID=\(target)", "-hdr", "-value"], true)
+            let brightness = MockDisplayTransport.Event.run(["set", "-UUID=\(target)", "-brightness=1.0"], false)
+            guard let hdrIndex = events.firstIndex(of: hdr), let brightnessIndex = events.firstIndex(of: brightness) else {
+                expect(false, "HDR qualification and brightness commands should both run")
+                return
+            }
+            expect(hdrIndex < brightnessIndex, "brightness must follow HDR qualification")
+            expect(events[..<hdrIndex].contains(.run(["set", "-UUID=\(target)", "-hardwareBacklight=on"], false)), "brightness must follow hardware backlight recovery")
+            expect(events[..<hdrIndex].contains(.run(["set", "-UUID=\(target)", "-ddc", "-vcp=powerMode", "-value=1"], false)), "brightness must follow final DDC power-on")
+        }
+    }
+
+    private static func testHDRBrightnessPartialFailure() async {
+        let transport = MockDisplayTransport()
+        await transport.setResult(.failure(.nonZeroExit(7)), for: ["set", "-UUID=Display Alpha", "-connected=on"])
+        await transport.setResult(successfulExecution(output: "on"), for: ["get", "-UUID=Display Beta", "-hdr", "-value"])
+        let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
+
+        _ = await backend.powerOn(targets: ["Display Alpha", "Display Beta"], restoreHDRBrightness: true)
+        let events = await transport.events
+        expect(!events.contains(.run(["set", "-UUID=Display Alpha", "-brightness=1.0"], false)), "failed reconnect must not receive brightness recovery")
+        expect(events.contains(.run(["set", "-UUID=Display Beta", "-brightness=1.0"], false)), "successfully reconnected display should receive brightness recovery")
+    }
+
+    private static func testHDRBrightnessQualificationStates() async {
+        let transport = MockDisplayTransport()
+        await transport.setResult(successfulExecution(output: "off"), for: ["get", "-UUID=SDR", "-hdr", "-value"])
+        await transport.setResult(successfulExecution(output: "unexpected"), for: ["get", "-UUID=Malformed", "-hdr", "-value"])
+        await transport.setResult(.failure(.timedOut), for: ["get", "-UUID=Unavailable", "-hdr", "-value"])
+        let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
+
+        _ = await backend.powerOn(targets: ["SDR", "Malformed", "Unavailable"], restoreHDRBrightness: true)
+        let events = await transport.events
+        for target in ["SDR", "Malformed", "Unavailable"] {
+            expect(!events.contains(.run(["set", "-UUID=\(target)", "-brightness=1.0"], false)), "Non-HDR or unavailable state must not trigger brightness recovery")
+        }
+    }
+
+    private static func testHDRBrightnessFailureRecovery() async {
+        let transport = MockDisplayTransport()
+        let hdr = ["get", "-UUID=Display Alpha", "-hdr", "-value"]
+        let brightness = ["set", "-UUID=Display Alpha", "-brightness=1.0"]
+        await transport.setResult(successfulExecution(output: "on"), for: hdr)
+        await transport.setResult(successfulExecution(output: "on"), for: ["get", "-UUID=Display Beta", "-hdr", "-value"])
+        await transport.setResult(.failure(.nonZeroExit(8)), for: brightness)
+        let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
+
+        let failedResult = await backend.powerOn(targets: ["Display Alpha", "Display Beta"], restoreHDRBrightness: true)
+        expect(failedResult.status == .failed, "brightness failure should be reported")
+        let failedEvents = await transport.events
+        expect(failedEvents.contains(.run(["set", "-UUID=Display Beta", "-brightness=1.0"], false)), "one brightness failure must not prevent unaffected displays")
+        await transport.setResult(successfulExecution(), for: brightness)
+        let laterResult = await backend.powerOn(targets: ["Display Alpha"], restoreHDRBrightness: true)
+        expect(laterResult.status == .succeeded, "brightness failure must not wedge a later power sequence")
+    }
+
+    private static func testHDRBrightnessCancellation() async {
+        let transport = MockDisplayTransport()
+        let gate = ManualGate()
+        let finalPower = ["set", "-UUID=Display Alpha", "-ddc", "-vcp=powerMode", "-value=1"]
+        await transport.block(arguments: finalPower, on: gate)
+        await transport.setResult(successfulExecution(output: "on"), for: ["get", "-UUID=Display Alpha", "-hdr", "-value"])
+        let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
+
+        let wakeTask = Task { await backend.powerOn(targets: ["Display Alpha"], restoreHDRBrightness: true) }
+        await gate.waitForWaiterCount(1)
+        let lockResult = await backend.powerOff(targets: ["Display Alpha"])
+        await gate.resumeAll()
+        let wakeResult = await wakeTask.value
+
+        expect(lockResult.status == .succeeded, "newer lock operation should complete")
+        expect(wakeResult.status == .superseded, "wake should be superseded before brightness recovery")
+        let events = await transport.events
+        expect(!events.contains(.run(["set", "-UUID=Display Alpha", "-brightness=1.0"], false)), "superseded wake must not restore brightness")
+    }
+
+    private static func testRepeatedHDRBrightnessCycles() async {
+        let transport = MockDisplayTransport()
+        await transport.setResult(successfulExecution(output: "on"), for: ["get", "-UUID=Display Alpha", "-hdr", "-value"])
+        let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
+
+        for cycle in 1...10 {
+            let offResult = await backend.powerOff(targets: ["Display Alpha"])
+            let onResult = await backend.powerOn(targets: ["Display Alpha"], restoreHDRBrightness: true)
+            expect(offResult.status == .succeeded, "Cycle \(cycle) power-off should succeed")
+            expect(onResult.status == .succeeded, "Cycle \(cycle) HDR recovery should succeed")
+        }
+        let events = await transport.events
+        let brightnessCount = events.filter { $0 == .run(["set", "-UUID=Display Alpha", "-brightness=1.0"], false) }.count
+        expect(brightnessCount == 10, "Every repeated wake cycle should restore HDR brightness once")
     }
 
     private static func testPowerOffSequence() async {
@@ -265,10 +381,10 @@ struct LuminaBackendTests {
         let events = await transport.events
         expect(events == [
             .ensure("power off"),
-            .run(["set", "-name=Display Alpha", "-connected=off"], false),
-            .run(["set", "-name=Display Alpha", "-ddc", "-vcp=powerMode", "-value=4"], false),
-            .run(["set", "-name=Display Beta", "-connected=off"], false),
-            .run(["set", "-name=Display Beta", "-ddc", "-vcp=powerMode", "-value=4"], false)
+            .run(["set", "-UUID=Display Alpha", "-connected=off"], false),
+            .run(["set", "-UUID=Display Alpha", "-ddc", "-vcp=powerMode", "-value=4"], false),
+            .run(["set", "-UUID=Display Beta", "-connected=off"], false),
+            .run(["set", "-UUID=Display Beta", "-ddc", "-vcp=powerMode", "-value=4"], false)
         ], "power-off should remain deterministic across displays")
     }
 
@@ -296,7 +412,7 @@ struct LuminaBackendTests {
 
     private static func testPartialCommandFailure() async {
         let transport = MockDisplayTransport()
-        let failedConnect = ["set", "-name=Display Alpha", "-connected=on"]
+        let failedConnect = ["set", "-UUID=Display Alpha", "-connected=on"]
         await transport.setResult(.failure(.nonZeroExit(7)), for: failedConnect)
         let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
 
@@ -305,13 +421,13 @@ struct LuminaBackendTests {
         expect(result.failedCommandCount == 1, "partial failure should count the failed command")
 
         let events = await transport.events
-        expect(!events.contains(.run(["perform", "-name=Display Alpha", "-reinitialize"], false)), "a display that failed to connect should not receive later wake stages")
-        expect(events.contains(.run(["perform", "-name=Display Beta", "-reinitialize"], false)), "other displays should continue after a recoverable per-display failure")
+        expect(!events.contains(.run(["perform", "-UUID=Display Alpha", "-reinitialize"], false)), "a display that failed to connect should not receive later wake stages")
+        expect(events.contains(.run(["perform", "-UUID=Display Beta", "-reinitialize"], false)), "other displays should continue after a recoverable per-display failure")
     }
 
     private static func testTerminalCommandFailure() async {
         let transport = MockDisplayTransport()
-        let firstCommand = ["set", "-name=Display Alpha", "-connected=on"]
+        let firstCommand = ["set", "-UUID=Display Alpha", "-connected=on"]
         await transport.setResult(.failure(.timedOut), for: firstCommand)
         let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
 
@@ -340,14 +456,14 @@ struct LuminaBackendTests {
         expect(powerOnResult.status == .superseded, "older staged power-on should be superseded")
 
         let events = await transport.events
-        expect(!events.contains(.run(["perform", "-name=Display Alpha", "-reinitialize"], false)), "superseded power-on should suppress stale reinitialize")
-        expect(!events.contains(.run(["set", "-name=Display Alpha", "-hardwareBacklight=on"], false)), "superseded power-on should suppress stale backlight recovery")
+        expect(!events.contains(.run(["perform", "-UUID=Display Alpha", "-reinitialize"], false)), "superseded power-on should suppress stale reinitialize")
+        expect(!events.contains(.run(["set", "-UUID=Display Alpha", "-hardwareBacklight=on"], false)), "superseded power-on should suppress stale backlight recovery")
     }
 
     private static func testStalePowerOffSupersededByPowerOn() async {
         let transport = MockDisplayTransport()
         let gate = ManualGate()
-        let firstOffCommand = ["set", "-name=Display Alpha", "-connected=off"]
+        let firstOffCommand = ["set", "-UUID=Display Alpha", "-connected=off"]
         await transport.block(arguments: firstOffCommand, on: gate)
         let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
 
@@ -364,7 +480,7 @@ struct LuminaBackendTests {
         expect(powerOffResult.status == .superseded, "older power-off should be superseded")
 
         let events = await transport.events
-        expect(!events.contains(.run(["set", "-name=Display Alpha", "-ddc", "-vcp=powerMode", "-value=4"], false)), "superseded power-off should not send its later DDC command")
+        expect(!events.contains(.run(["set", "-UUID=Display Alpha", "-ddc", "-vcp=powerMode", "-value=4"], false)), "superseded power-off should not send its later DDC command")
     }
 
     private static func testHeartbeatLifecycle() async {
