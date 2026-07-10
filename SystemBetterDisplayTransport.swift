@@ -16,6 +16,7 @@ actor SystemBetterDisplayTransport: BetterDisplayTransport {
     private let processRunner: AsyncProcessRunner
 
     private var launchInProgress = false
+    private var lastLaunchOutcome: BetterDisplayAvailability?
     private var commandTail: Task<Void, Never>?
     private var commandGeneration = 0
 
@@ -29,12 +30,14 @@ actor SystemBetterDisplayTransport: BetterDisplayTransport {
         }
 
         if await isBetterDisplayRunning() {
+            lastLaunchOutcome = .running
             return .running
         }
 
         let ownsLaunchAttempt = !launchInProgress
         if ownsLaunchAttempt {
             launchInProgress = true
+            lastLaunchOutcome = nil
         } else {
             logger.debug("Waiting for an existing BetterDisplay launch attempt before \(context, privacy: .private).")
         }
@@ -48,19 +51,23 @@ actor SystemBetterDisplayTransport: BetterDisplayTransport {
         if ownsLaunchAttempt {
             logger.info("Launching BetterDisplay before \(context, privacy: .private).")
 
+            let launchOutcome: BetterDisplayAvailability
             switch await Self.requestLaunch(bundleIdentifier: appBundleID, fallbackApplicationPath: fallbackApplicationPath) {
             case .requested:
-                break
+                launchOutcome = await waitForBetterDisplayToRun(observeSharedOutcome: false)
             case .unavailable:
                 logger.error("BetterDisplay was not found for bundle identifier \(self.appBundleID, privacy: .public).")
-                return .unavailable
+                launchOutcome = .unavailable
             case let .failed(message):
                 logger.error("BetterDisplay launch failed: \(message, privacy: .private)")
-                return .launchFailed(message)
+                launchOutcome = .launchFailed(message)
             }
+
+            lastLaunchOutcome = launchOutcome
+            return launchOutcome
         }
 
-        return await waitForBetterDisplayToRun()
+        return await waitForBetterDisplayToRun(observeSharedOutcome: true)
     }
 
     func run(arguments: [String], context: String, captureOutput: Bool) async -> BetterDisplayExecutionResult {
@@ -113,7 +120,7 @@ actor SystemBetterDisplayTransport: BetterDisplayTransport {
         return result
     }
 
-    private func waitForBetterDisplayToRun() async -> BetterDisplayAvailability {
+    private func waitForBetterDisplayToRun(observeSharedOutcome: Bool) async -> BetterDisplayAvailability {
         for _ in 0..<20 {
             if Task.isCancelled {
                 logger.debug("Cancelled BetterDisplay launch wait.")
@@ -124,12 +131,22 @@ actor SystemBetterDisplayTransport: BetterDisplayTransport {
                 return .running
             }
 
+            if observeSharedOutcome,
+               !launchInProgress,
+               let lastLaunchOutcome {
+                return lastLaunchOutcome
+            }
+
             do {
                 try await Task.sleep(nanoseconds: 250_000_000)
             } catch {
                 logger.debug("Cancelled BetterDisplay launch wait.")
                 return .cancelled
             }
+        }
+
+        if observeSharedOutcome, let lastLaunchOutcome {
+            return lastLaunchOutcome
         }
 
         logger.warning("Timed out waiting for BetterDisplay to launch.")
