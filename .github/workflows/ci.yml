@@ -78,6 +78,14 @@ jobs:
             exit 1
           fi
 
+      - name: Upload failed build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumina-build-log
+          path: build.log
+          retention-days: 1
+
       - name: Verify app bundle
         run: |
           test -x Build/Lumina.app/Contents/MacOS/Lumina
