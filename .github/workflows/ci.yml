@@ -6,14 +6,25 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-and-build:
     name: Test and build
     runs-on: macos-latest
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Validate shell scripts
+        run: bash -n build.sh test_logic.sh test_backend.sh
 
       - name: Run logic tests
         run: bash test_logic.sh
@@ -23,3 +34,8 @@ jobs:
 
       - name: Build app bundle
         run: BUILD_TARGET="$(uname -m)-apple-macosx13.0" bash build.sh
+
+      - name: Verify app bundle
+        run: |
+          test -x Build/Lumina.app/Contents/MacOS/Lumina
+          codesign --verify --deep --strict Build/Lumina.app
