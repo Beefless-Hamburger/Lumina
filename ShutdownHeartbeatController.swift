@@ -1,6 +1,6 @@
 import Foundation
 
-protocol HeartbeatTimerToken: AnyObject {
+protocol HeartbeatTimerToken: AnyObject, Sendable {
     func invalidate()
 }
 
@@ -13,7 +13,7 @@ protocol HeartbeatScheduling: AnyObject {
     ) -> any HeartbeatTimerToken
 }
 
-final class FoundationHeartbeatTimerToken: HeartbeatTimerToken {
+final class FoundationHeartbeatTimerToken: HeartbeatTimerToken, @unchecked Sendable {
     private let timer: Timer
 
     init(timer: Timer) {
