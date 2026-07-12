@@ -72,6 +72,7 @@ actor MockDisplayTransport: BetterDisplayTransport {
     private var availability: BetterDisplayAvailability = .running
     private var refreshOutput = ""
     private var resultsByCommand: [String: BetterDisplayExecutionResult] = [:]
+    private var resultQueuesByCommand: [String: [BetterDisplayExecutionResult]] = [:]
     private var gatesByCommand: [String: ManualGate] = [:]
 
     func setAvailability(_ availability: BetterDisplayAvailability) {
@@ -84,6 +85,10 @@ actor MockDisplayTransport: BetterDisplayTransport {
 
     func setResult(_ result: BetterDisplayExecutionResult, for arguments: [String]) {
         resultsByCommand[commandKey(arguments)] = result
+    }
+
+    func setResults(_ results: [BetterDisplayExecutionResult], for arguments: [String]) {
+        resultQueuesByCommand[commandKey(arguments)] = results
     }
 
     func block(arguments: [String], on gate: ManualGate) {
@@ -110,7 +115,13 @@ actor MockDisplayTransport: BetterDisplayTransport {
             return successfulExecution(output: refreshOutput)
         }
 
-        return resultsByCommand[commandKey(arguments)] ?? successfulExecution()
+        let key = commandKey(arguments)
+        if var queue = resultQueuesByCommand[key], !queue.isEmpty {
+            let result = queue.removeFirst()
+            resultQueuesByCommand[key] = queue
+            return result
+        }
+        return resultsByCommand[key] ?? successfulExecution()
     }
 
     private func commandKey(_ arguments: [String]) -> String {
@@ -209,6 +220,8 @@ struct LuminaBackendTests {
         await testRefreshParsing()
         await testPowerOnSequence()
         await testHDRBrightnessRecovery()
+        await testNormalizedBrightnessRetriesAfterReversion()
+        await testNormalizedBrightnessRetryCancellation()
         await testHDRBrightnessPartialFailure()
         await testHDRBrightnessQualificationStates()
         await testHDRBrightnessFailureRecovery()
@@ -268,6 +281,7 @@ struct LuminaBackendTests {
                 successfulExecution(output: "on\n"),
                 for: ["get", "-UUID=\(target)", "-hdr", "-value"]
             )
+            await configureNormalizedBrightnessRecovery(transport, target: target)
         }
         let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
 
@@ -291,10 +305,58 @@ struct LuminaBackendTests {
         }
     }
 
+    private static func testNormalizedBrightnessRetriesAfterReversion() async {
+        let transport = MockDisplayTransport()
+        await configureNormalizedBrightnessRecovery(transport, target: "Display Alpha")
+        await transport.setResults([
+            successfulExecution(output: "off"),
+            successfulExecution(output: "on")
+        ], for: ["get", "-UUID=Display Alpha", "-connected", "-value"])
+        let readback = ["get", "-UUID=Display Alpha", "-brightness", "-value", "-min", "-max"]
+        await transport.setResults([
+            successfulExecution(output: "1.0,0.0,1.0"),
+            successfulExecution(output: "0.7,0.0,1.0"),
+            successfulExecution(output: "1.0,0.0,1.0"),
+            successfulExecution(output: "1.0,0.0,1.0")
+        ], for: readback)
+        let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
+
+        let result = await backend.powerOn(targets: ["Display Alpha"], restoreHDRBrightness: true)
+        expect(result.status == .succeeded, "Recovery should retry after BetterDisplay reverts brightness")
+        let events = await transport.events
+        let setCount = events.filter { $0 == .run(["set", "-UUID=Display Alpha", "-brightness=1.0"], false) }.count
+        expect(setCount == 2, "Brightness should be set again after a non-maximum readback")
+    }
+
+    private static func testNormalizedBrightnessRetryCancellation() async {
+        let transport = MockDisplayTransport()
+        let sleeper = ManualSleeper()
+        await configureNormalizedBrightnessRecovery(transport, target: "Display Alpha")
+        await transport.setResult(successfulExecution(output: "0.5,0.0,1.0"), for: ["get", "-UUID=Display Alpha", "-brightness", "-value", "-min", "-max"])
+        let backend = BetterDisplayService(transport: transport, sleeper: sleeper)
+        let wakeTask = Task { await backend.powerOn(targets: ["Display Alpha"], restoreHDRBrightness: true) }
+
+        await sleeper.waitForSleepCount(1)
+        await sleeper.resumeAll()
+        await sleeper.waitForSleepCount(2)
+        await sleeper.resumeAll()
+        await sleeper.waitForSleepCount(3)
+        let lockResult = await backend.powerOff(targets: ["Display Alpha"])
+        await sleeper.resumeAll()
+        let wakeResult = await wakeTask.value
+
+        expect(lockResult.status == .succeeded, "Newer lock should complete during retry delay")
+        expect(wakeResult.status == .superseded, "Brightness retry should stop when superseded")
+        let events = await transport.events
+        let setCount = events.filter { $0 == .run(["set", "-UUID=Display Alpha", "-brightness=1.0"], false) }.count
+        expect(setCount == 1, "No second brightness command should run after cancellation")
+    }
+
     private static func testHDRBrightnessPartialFailure() async {
         let transport = MockDisplayTransport()
         await transport.setResult(.failure(.nonZeroExit(7)), for: ["set", "-UUID=Display Alpha", "-connected=on"])
         await transport.setResult(successfulExecution(output: "on"), for: ["get", "-UUID=Display Beta", "-hdr", "-value"])
+        await configureNormalizedBrightnessRecovery(transport, target: "Display Beta")
         let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
 
         _ = await backend.powerOn(targets: ["Display Alpha", "Display Beta"], restoreHDRBrightness: true)
@@ -305,6 +367,9 @@ struct LuminaBackendTests {
 
     private static func testHDRBrightnessQualificationStates() async {
         let transport = MockDisplayTransport()
+        for target in ["SDR", "Malformed", "Unavailable"] {
+            await transport.setResult(successfulExecution(output: "on"), for: ["get", "-UUID=\(target)", "-connected", "-value"])
+        }
         await transport.setResult(successfulExecution(output: "off"), for: ["get", "-UUID=SDR", "-hdr", "-value"])
         await transport.setResult(successfulExecution(output: "unexpected"), for: ["get", "-UUID=Malformed", "-hdr", "-value"])
         await transport.setResult(.failure(.timedOut), for: ["get", "-UUID=Unavailable", "-hdr", "-value"])
@@ -323,6 +388,8 @@ struct LuminaBackendTests {
         let brightness = ["set", "-UUID=Display Alpha", "-brightness=1.0"]
         await transport.setResult(successfulExecution(output: "on"), for: hdr)
         await transport.setResult(successfulExecution(output: "on"), for: ["get", "-UUID=Display Beta", "-hdr", "-value"])
+        await configureNormalizedBrightnessRecovery(transport, target: "Display Alpha")
+        await configureNormalizedBrightnessRecovery(transport, target: "Display Beta")
         await transport.setResult(.failure(.nonZeroExit(8)), for: brightness)
         let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
 
@@ -341,6 +408,7 @@ struct LuminaBackendTests {
         let finalPower = ["set", "-UUID=Display Alpha", "-ddc", "-vcp=powerMode", "-value=1"]
         await transport.block(arguments: finalPower, on: gate)
         await transport.setResult(successfulExecution(output: "on"), for: ["get", "-UUID=Display Alpha", "-hdr", "-value"])
+        await configureNormalizedBrightnessRecovery(transport, target: "Display Alpha")
         let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
 
         let wakeTask = Task { await backend.powerOn(targets: ["Display Alpha"], restoreHDRBrightness: true) }
@@ -358,6 +426,7 @@ struct LuminaBackendTests {
     private static func testRepeatedHDRBrightnessCycles() async {
         let transport = MockDisplayTransport()
         await transport.setResult(successfulExecution(output: "on"), for: ["get", "-UUID=Display Alpha", "-hdr", "-value"])
+        await configureNormalizedBrightnessRecovery(transport, target: "Display Alpha")
         let backend = BetterDisplayService(transport: transport, sleeper: ImmediateSleeper())
 
         for cycle in 1...10 {
@@ -369,6 +438,21 @@ struct LuminaBackendTests {
         let events = await transport.events
         let brightnessCount = events.filter { $0 == .run(["set", "-UUID=Display Alpha", "-brightness=1.0"], false) }.count
         expect(brightnessCount == 10, "Every repeated wake cycle should restore HDR brightness once")
+    }
+
+    private static func configureNormalizedBrightnessRecovery(_ transport: MockDisplayTransport, target: String) async {
+        await transport.setResult(
+            successfulExecution(output: "on"),
+            for: ["get", "-UUID=\(target)", "-connected", "-value"]
+        )
+        await transport.setResult(
+            successfulExecution(output: "on"),
+            for: ["get", "-UUID=\(target)", "-hdr", "-value"]
+        )
+        await transport.setResult(
+            successfulExecution(output: "1.0,0.0,1.0"),
+            for: ["get", "-UUID=\(target)", "-brightness", "-value", "-min", "-max"]
+        )
     }
 
     private static func testPowerOffSequence() async {

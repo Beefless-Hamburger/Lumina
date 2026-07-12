@@ -3,11 +3,26 @@ import os
 
 actor BetterDisplayService: DisplayBackend {
     private static let fullBrightness = "1.0"
+    private static let brightnessRecoveryAttemptCount = 3
+    private static let readinessAttemptCount = 5
+    private static let brightnessRetryDelayNanoseconds: UInt64 = 250_000_000
+    private static let normalizedBrightnessTolerance = 0.001
 
-    private enum CommandDecision {
+    private enum CommandDecision: Equatable {
         case succeeded
         case recoverableFailure
         case terminalFailure
+        case superseded
+    }
+
+    private struct BrightnessRecoveryOutcome {
+        let decision: CommandDecision
+        let attemptedCommandCount: Int
+    }
+
+    private enum BrightnessReadiness {
+        case ready
+        case notQualified
         case superseded
     }
 
@@ -205,40 +220,19 @@ actor BetterDisplayService: DisplayBackend {
                     return supersededResult(attemptedCommands: attemptedCommands, failedCommands: failedCommands)
                 }
 
-                logger.debug("Checking HDR brightness recovery qualification for target index \(index, privacy: .public).")
-                let hdrResult = await transport.run(
-                    arguments: ["get", "-UUID=\(display)", "-hdr", "-value"],
-                    context: "check HDR state",
-                    captureOutput: true
-                )
-                guard shouldContinue(sequence, label: "HDR brightness qualification") else {
-                    return supersededResult(attemptedCommands: attemptedCommands, failedCommands: failedCommands)
-                }
-
-                guard hdrResult.succeeded else {
-                    logger.warning("HDR detection was unavailable for target index \(index, privacy: .public); skipping brightness recovery.")
-                    continue
-                }
-                guard hdrResult.output.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "on" else {
-                    logger.debug("Target index \(index, privacy: .public) did not qualify for HDR brightness recovery.")
-                    continue
-                }
-
-                attemptedCommands += 1
                 logger.debug("Attempting HDR brightness recovery for target index \(index, privacy: .public).")
-                switch await executeCommand(
-                    arguments: ["set", "-UUID=\(display)", "-brightness=\(Self.fullBrightness)"],
-                    context: "restore HDR brightness",
-                    sequence: sequence
-                ) {
+                let recovery = await performHDRBrightnessRecovery(display: display, targetIndex: index, sequence: sequence)
+                attemptedCommands += recovery.attemptedCommandCount
+                switch recovery.decision {
                 case .succeeded:
-                    logger.debug("HDR brightness recovery succeeded for target index \(index, privacy: .public).")
-                case .recoverableFailure:
+                    if recovery.attemptedCommandCount == 0 {
+                        logger.debug("Target index \(index, privacy: .public) did not qualify for HDR brightness recovery.")
+                    } else {
+                        logger.debug("Verified HDR brightness recovery for target index \(index, privacy: .public).")
+                    }
+                case .recoverableFailure, .terminalFailure:
                     failedCommands += 1
-                    logger.warning("HDR brightness recovery failed for target index \(index, privacy: .public).")
-                case .terminalFailure:
-                    failedCommands += 1
-                    logger.warning("HDR brightness recovery could not complete for target index \(index, privacy: .public).")
+                    logger.warning("HDR brightness recovery was not verified for target index \(index, privacy: .public).")
                 case .superseded:
                     return supersededResult(attemptedCommands: attemptedCommands, failedCommands: failedCommands)
                 }
@@ -248,6 +242,119 @@ actor BetterDisplayService: DisplayBackend {
         }
 
         return completedResult(attemptedCommands: attemptedCommands, failedCommands: failedCommands)
+    }
+
+    private func performHDRBrightnessRecovery(display: String, targetIndex: Int, sequence: Int) async -> BrightnessRecoveryOutcome {
+        switch await waitUntilDisplayIsReady(display: display, targetIndex: targetIndex, sequence: sequence) {
+        case .ready:
+            break
+        case .notQualified:
+            return BrightnessRecoveryOutcome(decision: .succeeded, attemptedCommandCount: 0)
+        case .superseded:
+            return BrightnessRecoveryOutcome(decision: .superseded, attemptedCommandCount: 0)
+        }
+
+        var setAttempts = 0
+        for attempt in 1...Self.brightnessRecoveryAttemptCount {
+            guard shouldContinue(sequence, label: "normalized HDR recovery") else {
+                return BrightnessRecoveryOutcome(decision: .superseded, attemptedCommandCount: setAttempts)
+            }
+
+            setAttempts += 1
+            let setDecision = await executeCommand(
+                arguments: ["set", "-UUID=\(display)", "-brightness=\(Self.fullBrightness)"],
+                context: "restore normalized HDR brightness",
+                sequence: sequence
+            )
+            guard setDecision == .succeeded else {
+                return BrightnessRecoveryOutcome(decision: setDecision, attemptedCommandCount: setAttempts)
+            }
+
+            guard await waitForBrightnessRetry(sequence: sequence) else {
+                return BrightnessRecoveryOutcome(decision: .superseded, attemptedCommandCount: setAttempts)
+            }
+            guard await normalizedBrightnessIsMaximum(display: display, sequence: sequence) else {
+                logger.warning("Normalized brightness was below maximum after attempt \(attempt, privacy: .public) for target index \(targetIndex, privacy: .public); retrying.")
+                continue
+            }
+
+            guard await waitForBrightnessRetry(sequence: sequence) else {
+                return BrightnessRecoveryOutcome(decision: .superseded, attemptedCommandCount: setAttempts)
+            }
+            guard await normalizedBrightnessIsMaximum(display: display, sequence: sequence) else {
+                logger.warning("Normalized brightness reverted after attempt \(attempt, privacy: .public) for target index \(targetIndex, privacy: .public); retrying.")
+                continue
+            }
+
+            logger.debug("Normalized HDR brightness remained at maximum for target index \(targetIndex, privacy: .public) after attempt \(attempt, privacy: .public).")
+            return BrightnessRecoveryOutcome(decision: .succeeded, attemptedCommandCount: setAttempts)
+        }
+
+        return BrightnessRecoveryOutcome(decision: .recoverableFailure, attemptedCommandCount: setAttempts)
+    }
+
+    private func waitUntilDisplayIsReady(display: String, targetIndex: Int, sequence: Int) async -> BrightnessReadiness {
+        for attempt in 1...Self.readinessAttemptCount {
+            guard shouldContinue(sequence, label: "display readiness") else { return .superseded }
+            let connected = await transport.run(
+                arguments: ["get", "-UUID=\(display)", "-connected", "-value"],
+                context: "check display connection readiness",
+                captureOutput: true
+            )
+            guard shouldContinue(sequence, label: "display readiness") else { return .superseded }
+            let hdr = await transport.run(
+                arguments: ["get", "-UUID=\(display)", "-hdr", "-value"],
+                context: "check HDR readiness",
+                captureOutput: true
+            )
+            guard shouldContinue(sequence, label: "display readiness") else { return .superseded }
+
+            if connected.succeeded,
+               connected.output.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "on",
+               hdr.succeeded,
+               hdr.output.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "on" {
+                logger.debug("Display target index \(targetIndex, privacy: .public) became connected and HDR-ready on attempt \(attempt, privacy: .public).")
+                return .ready
+            }
+
+            if attempt < Self.readinessAttemptCount,
+               !(await waitForBrightnessRetry(sequence: sequence)) {
+                return .superseded
+            }
+        }
+
+        logger.warning("Display target index \(targetIndex, privacy: .public) did not become connected and HDR-ready.")
+        return .notQualified
+    }
+
+    private func normalizedBrightnessIsMaximum(display: String, sequence: Int) async -> Bool {
+        let result = await transport.run(
+            arguments: ["get", "-UUID=\(display)", "-brightness", "-value", "-min", "-max"],
+            context: "verify normalized HDR brightness",
+            captureOutput: true
+        )
+        guard shouldContinue(sequence, label: "normalized HDR verification"),
+              result.succeeded,
+              let (current, maximum) = Self.parseNormalizedBrightness(result.output) else {
+            return false
+        }
+        return abs(current - maximum) <= Self.normalizedBrightnessTolerance
+    }
+
+    private func waitForBrightnessRetry(sequence: Int) async -> Bool {
+        guard shouldContinue(sequence, label: "HDR brightness retry delay") else { return false }
+        do {
+            try await sleeper.sleep(nanoseconds: Self.brightnessRetryDelayNanoseconds)
+        } catch {
+            return false
+        }
+        return shouldContinue(sequence, label: "HDR brightness retry delay")
+    }
+
+    private static func parseNormalizedBrightness(_ output: String) -> (current: Double, maximum: Double)? {
+        let values = output.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard values.count == 3 else { return nil }
+        return (values[0], values[2])
     }
 
     private func beginPowerSequence(label: String, targets: [String]) -> Int {

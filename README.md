@@ -115,12 +115,15 @@ reinitialize
 wait 2 seconds
 hardwareBacklight=on
 ddc powerMode=1
-[if enabled and HDR is on] brightness=1.0
+[if enabled] begin HDR brightness readiness check
+wait until the target UUID reports connected and HDR active
+brightness=1.0
+verify normalized maximum twice; retry if BetterDisplay reverts it
 ```
 
 The delays are intentional. Some monitors need time to re-establish their connection before accepting reinitialization and backlight commands.
 
-HDR brightness recovery is manually enabled and runs only after an automatic unlock/wake transition; it does not run at app launch or with **Force Power On**. Lumina queries BetterDisplay's per-display `hdr` value after the normal wake stages. For displays reporting HDR on, it sets BetterDisplay's normalized `brightness` value to `1.0` (100%). BetterDisplay chooses the available hardware, software, or combined brightness mechanism. The HDR query provides a serialized readiness round-trip, so Lumina does not add another fixed delay or retry loop. A brightness failure is reported but does not prevent other displays or later lifecycle cycles from continuing.
+HDR brightness recovery is manually enabled and runs only after an automatic unlock/wake transition; it does not run at app launch or with **Force Power On**. After the normal wake stages, Lumina waits until the stable display UUID reports both connected and HDR active. It then sets BetterDisplay's normalized `brightness` value to `1.0`, waits briefly, and reads normalized brightness back twice. If BetterDisplay is still finishing reinitialization and overwrites the first command, Lumina retries up to two more times. Lumina does not calculate, store, or verify physical nit values; BetterDisplay remains responsible for mapping normalized 100% to the current display configuration. A brightness or verification failure is reported but does not prevent other displays or later lifecycle cycles from continuing.
 
 ## Reliability Design
 
