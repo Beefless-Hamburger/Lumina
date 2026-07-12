@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 APP_NAME="Lumina"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.0.2}"
 OUTPUT_DIR="${OUTPUT_DIR:-dist}"
 DMG_NAME="${APP_NAME}-${VERSION}.dmg"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/LuminaDMG.XXXXXX")"

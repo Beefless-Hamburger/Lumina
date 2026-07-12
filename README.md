@@ -196,13 +196,13 @@ BUILD_TARGET="$(uname -m)-apple-macosx13.0" bash build.sh
 Version and output values can also be supplied explicitly:
 
 ```bash
-APP_VERSION="1.0.1" BUILD_DIR="Build" bash build.sh
+APP_VERSION="1.0.2" BUILD_DIR="Build" bash build.sh
 ```
 
 ### Build a universal DMG
 
 ```bash
-VERSION="1.0.1" bash package_dmg.sh
+VERSION="1.0.2" bash package_dmg.sh
 ```
 
 This compiles Apple Silicon and Intel variants, combines them into a universal binary, verifies the app signature, creates a drag-and-drop DMG, and writes a SHA-256 checksum under `dist/`.
